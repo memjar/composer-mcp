@@ -36,6 +36,7 @@ except ImportError:
 
 AIVISION_URL = os.environ.get("AIVISION_URL", "http://127.0.0.1:7790")
 COMPOSE_HOST = os.environ.get("COMPOSE_HOST", "")
+WHITEBOARD_URL = os.environ.get("WHITEBOARD_URL", "http://127.0.0.1:7780")
 
 _HEX_RE = re.compile(r"^#?[0-9a-fA-F]{6}$")
 
@@ -732,7 +733,11 @@ def tool_create_component(args: dict) -> dict:
 
     markup = _component_react(matched, spec, tokens) if framework == "react-tailwind" else _component_html(matched, spec, tokens)
 
-    return {"component": matched, "spec": spec, "markup": markup, "framework": framework}
+    result = {"component": matched, "spec": spec, "markup": markup, "framework": framework}
+    if args.get("push_to_whiteboard"):
+        wb = _push_to_whiteboard(markup, "html", f"Component: {matched}", args.get("board_id"))
+        result["whiteboard"] = wb
+    return result
 
 
 # ── Tool: compose_page ──
@@ -805,7 +810,11 @@ a{{color:{t['primary']};text-decoration:none}}
 </body>
 </html>"""
 
-    return {"html": html, "pattern": matched, "notes": f"Layout: {matched}, font: {heading_font}, motion: semantic timing tokens"}
+    result = {"html": html, "pattern": matched, "notes": f"Layout: {matched}, font: {heading_font}, motion: semantic timing tokens"}
+    if args.get("push_to_whiteboard"):
+        wb = _push_to_whiteboard(html, "html", f"Page: {matched}", args.get("board_id"))
+        result["whiteboard"] = wb
+    return result
 
 
 # ── Tool: export ──
@@ -834,7 +843,41 @@ def tool_export(args: dict) -> dict:
         except Exception as e:
             return {"error": f"compose host unreachable: {e}"}
 
+    if target == "whiteboard":
+        return _push_to_whiteboard(content, content_type, title, args.get("board_id"), args.get("width", 1440), args.get("height", 900))
+
     return {"error": "compose_host not configured" if target == "compose_host" else "unknown target"}
+
+
+def _push_to_whiteboard(html, content_type="html", title="Untitled", board_id=None, width=1440, height=900):
+    import urllib.request
+    import urllib.error
+    if content_type not in ("html", "svg"):
+        html = f"<pre style='font-family:monospace;white-space:pre-wrap;padding:16px'>{html}</pre>"
+    try:
+        if not board_id:
+            body = json.dumps({"tool": "app_create", "arguments": {"name": title}}).encode()
+            req = urllib.request.Request(f"{WHITEBOARD_URL}/api/mcp", data=body, headers={"Content-Type": "application/json"}, method="POST")
+            with urllib.request.urlopen(req, timeout=10) as resp:
+                board_id = json.loads(resp.read()).get("board_id")
+        body = json.dumps({"tool": "layer_add", "arguments": {"board_id": board_id, "type": "html", "html": html, "width": width, "height": height, "label": title}}).encode()
+        req = urllib.request.Request(f"{WHITEBOARD_URL}/api/mcp", data=body, headers={"Content-Type": "application/json"}, method="POST")
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            layer = json.loads(resp.read())
+        return {"board_id": board_id, "layer_id": layer.get("layer", {}).get("id"), "url": f"{WHITEBOARD_URL}/#board={board_id}", "title": title}
+    except (urllib.error.URLError, urllib.error.HTTPError) as e:
+        return {"error": f"whiteboard unreachable: {e}"}
+
+
+def tool_push_to_whiteboard(args: dict) -> dict:
+    html = args.get("html", args.get("content", ""))
+    title = args.get("title", "Composer Artifact")
+    board_id = args.get("board_id")
+    width = args.get("width", 1440)
+    height = args.get("height", 900)
+    if not html:
+        return {"error": "html or content required"}
+    return _push_to_whiteboard(html, "html", title, board_id, width, height)
 
 
 # ── Tool: export_tokens ──
@@ -1146,6 +1189,11 @@ TOOLS = {
         "description": "Extract video metadata via FFprobe: duration, resolution, FPS, codecs, bitrate, audio channels. Requires FFmpeg installed.",
         "inputSchema": {"type": "object", "properties": {"source": {"type": "string", "description": "Path to video file"}}, "required": ["source"]},
         "handler": tool_video_probe,
+    },
+    "push_to_whiteboard": {
+        "description": "Push HTML content as a frame to the Whiteboard canvas. Creates a new board if board_id is not provided. Returns board URL.",
+        "inputSchema": {"type": "object", "properties": {"html": {"type": "string", "description": "HTML content to push"}, "title": {"type": "string", "default": "Composer Artifact"}, "board_id": {"type": "string", "description": "Existing board ID (creates new if omitted)"}, "width": {"type": "integer", "default": 1440}, "height": {"type": "integer", "default": 900}}, "required": ["html"]},
+        "handler": tool_push_to_whiteboard,
     },
 }
 
