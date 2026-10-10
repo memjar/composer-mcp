@@ -12,7 +12,9 @@ Optional aivision bridge for image rendering (AIVISION_URL env var).
 import base64
 import colorsys
 import json
+import math
 import os
+import re
 import sys
 import textwrap
 from pathlib import Path
@@ -26,6 +28,21 @@ except ImportError:
 AIVISION_URL = os.environ.get("AIVISION_URL", "http://127.0.0.1:7790")
 COMPOSE_HOST = os.environ.get("COMPOSE_HOST", "")
 
+_HEX_RE = re.compile(r"^#?[0-9a-fA-F]{6}$")
+
+
+def _valid_hex(c: str) -> bool:
+    return bool(c and _HEX_RE.match(c))
+
+
+def _sanitize_hex(c: str) -> str:
+    c = c.strip()
+    if not c.startswith("#"):
+        c = "#" + c
+    if not _valid_hex(c):
+        raise ValueError(f"invalid hex color: {c}")
+    return c.lower()
+
 
 def _hsl_to_hex(h: float, s: float, l: float) -> str:
     r, g, b = colorsys.hls_to_rgb(h / 360.0, l, s)
@@ -35,6 +52,31 @@ def _hsl_to_hex(h: float, s: float, l: float) -> str:
 def _hex_to_rgb(h: str) -> tuple[int, int, int]:
     h = h.lstrip("#")
     return int(h[0:2], 16), int(h[2:4], 16), int(h[4:6], 16)
+
+
+def _simulate_cvd(hex_color: str, deficiency: str) -> str:
+    r, g, b = [c / 255.0 for c in _hex_to_rgb(hex_color)]
+    matrices = {
+        "protanopia": ((0.567, 0.433, 0.0), (0.558, 0.442, 0.0), (0.0, 0.242, 0.758)),
+        "deuteranopia": ((0.625, 0.375, 0.0), (0.7, 0.3, 0.0), (0.0, 0.3, 0.7)),
+        "tritanopia": ((0.95, 0.05, 0.0), (0.0, 0.433, 0.567), (0.0, 0.475, 0.525)),
+    }
+    m = matrices.get(deficiency, matrices["deuteranopia"])
+    sr = min(1, max(0, m[0][0] * r + m[0][1] * g + m[0][2] * b))
+    sg = min(1, max(0, m[1][0] * r + m[1][1] * g + m[1][2] * b))
+    sb = min(1, max(0, m[2][0] * r + m[2][1] * g + m[2][2] * b))
+    return "#{:02x}{:02x}{:02x}".format(round(sr * 255), round(sg * 255), round(sb * 255))
+
+
+def _color_distance(c1: str, c2: str) -> float:
+    r1, g1, b1 = _hex_to_rgb(c1)
+    r2, g2, b2 = _hex_to_rgb(c2)
+    return math.sqrt((r1 - r2) ** 2 + (g1 - g2) ** 2 + (b1 - b2) ** 2)
+
+
+_BREAKPOINTS = {"sm": 640, "md": 768, "lg": 1024, "xl": 1280, "2xl": 1536}
+_Z_INDEX = {"dropdown": 1000, "sticky": 1020, "fixed": 1030, "modal-backdrop": 1040, "modal": 1050, "popover": 1060, "tooltip": 1070, "toast": 1080}
+_TRANSITIONS = {"fast": "150ms ease", "normal": "200ms ease", "slow": "300ms ease-out", "spring": "500ms cubic-bezier(0.34,1.56,0.64,1)"}
 
 
 def _relative_luminance(hex_color: str) -> float:
@@ -300,11 +342,22 @@ def tool_generate_design_system(args: dict) -> dict:
     tokens = {**first_palette["roles"], "heading_font": heading_font, "body_font": body_font, "type_scale": _TYPE_SCALE, "spacing": _SPACING_SCALE}
     tokens_css = _tokens_to_css(tokens)
 
+    cvd_report = {}
+    for deficiency in ("protanopia", "deuteranopia", "tritanopia"):
+        sim_primary = _simulate_cvd(first_palette["roles"]["primary"], deficiency)
+        sim_bg = _simulate_cvd(first_palette["roles"]["background"], deficiency)
+        ratio = _contrast_ratio(sim_primary, sim_bg)
+        cvd_report[deficiency] = {"simulated_primary": sim_primary, "contrast_vs_bg": ratio, "passes_3_1": ratio >= 3.0}
+
     return {
         "design_system": {
             "palette": palettes,
             "typography": typography,
             "spacing": {"scale": _SPACING_SCALE, "unit": "px"},
+            "breakpoints": _BREAKPOINTS,
+            "z_index": _Z_INDEX,
+            "transitions": _TRANSITIONS,
+            "grid": {"columns": 12, "gutter": 24, "margin": 16, "max_width": 1280},
             "border_radius": {"sm": 4, "md": 8, "lg": 12, "xl": 16, "full": 9999},
             "shadows": {
                 "sm": "0 1px 2px rgba(0,0,0,0.06)",
@@ -314,6 +367,7 @@ def tool_generate_design_system(args: dict) -> dict:
             },
             "components": components,
             "accessibility": accessibility,
+            "color_vision_deficiency": cvd_report,
         },
         "tokens_css": tokens_css,
     }
@@ -347,20 +401,109 @@ def _component_html(name: str, spec: dict, tokens: dict) -> str:
 
 def _component_react(name: str, spec: dict, tokens: dict) -> str:
     p = tokens or {}
-    radius = spec.get("radius", 8)
-    if name == "button":
-        return textwrap.dedent(f"""\
-        export function Button({{ children, variant = "primary", size = "md", ...props }}) {{
-          return (
-            <button
-              className={{`px-4 py-2.5 rounded-lg font-semibold text-white bg-[{p.get('primary','#3b82f6')}] hover:opacity-90 transition-opacity ${{variant === "outline" ? "bg-transparent border border-current" : ""}} ${{size === "sm" ? "px-3 py-1.5 text-sm" : size === "lg" ? "px-6 py-3.5 text-lg" : ""}}`}}
-              {{...props}}
-            >
-              {{children}}
-            </button>
-          );
-        }}""")
-    return f"// {name} component — apply tokens via Tailwind config"
+    primary = p.get("primary", "#3b82f6")
+    border = p.get("border", "#e5e7eb")
+    surface = p.get("surface", "#f9fafb")
+    text_c = p.get("text", "#111827")
+    _react = {
+        "button": f'''export function Button({{ children, variant = "primary", size = "md", disabled, ...props }}) {{
+  const base = "inline-flex items-center justify-center font-semibold transition-all focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[{primary}] disabled:opacity-50 disabled:cursor-not-allowed";
+  const variants = {{ primary: "bg-[{primary}] text-white hover:opacity-90", secondary: "bg-[{surface}] text-[{text_c}] border border-[{border}] hover:bg-[{border}]", outline: "bg-transparent text-[{primary}] border border-[{primary}] hover:bg-[{primary}]/10", ghost: "bg-transparent text-[{text_c}] hover:bg-[{surface}]", destructive: "bg-red-600 text-white hover:bg-red-700" }};
+  const sizes = {{ sm: "px-3 py-1.5 text-sm rounded-md gap-1.5", md: "px-4 py-2.5 text-base rounded-lg gap-2", lg: "px-6 py-3.5 text-lg rounded-lg gap-2.5" }};
+  return <button className={{`${{base}} ${{variants[variant]}} ${{sizes[size]}}`}} disabled={{disabled}} {{...props}}>{{children}}</button>;
+}}''',
+        "card": f'''export function Card({{ children, variant = "elevated", className, ...props }}) {{
+  const variants = {{ elevated: "shadow-md bg-[{surface}]", outlined: "border border-[{border}] bg-[{surface}]", filled: "bg-[{surface}]" }};
+  return <div className={{`rounded-xl p-6 text-[{text_c}] ${{variants[variant]}} ${{className || ""}}`}} {{...props}}>{{children}}</div>;
+}}''',
+        "input": f'''export function Input({{ label, error, size = "md", variant = "outlined", ...props }}) {{
+  const sizes = {{ sm: "px-3 py-2 text-sm", md: "px-4 py-3 text-base", lg: "px-5 py-4 text-lg" }};
+  const variants = {{ outlined: "border border-[{border}] bg-transparent", filled: "border-0 bg-[{surface}]", underlined: "border-0 border-b-2 border-[{border}] rounded-none bg-transparent" }};
+  return (
+    <div className="flex flex-col gap-1">
+      {{label && <label className="text-sm font-medium text-[{text_c}]">{{label}}</label>}}
+      <input className={{`rounded-lg text-[{text_c}] outline-none transition-colors focus:border-[{primary}] focus:ring-2 focus:ring-[{primary}]/20 disabled:opacity-50 ${{sizes[size]}} ${{variants[variant]}} ${{error ? "border-red-500" : ""}}`}} {{...props}} />
+      {{error && <span className="text-sm text-red-500">{{error}}</span>}}
+    </div>
+  );
+}}''',
+        "badge": f'''export function Badge({{ children, variant = "solid", color = "{primary}" }}) {{
+  const variants = {{ solid: `bg-[${{color}}] text-white`, outline: `border border-[${{color}}] text-[${{color}}]`, soft: `bg-[${{color}}]/10 text-[${{color}}]` }};
+  return <span className={{`inline-flex items-center px-2 py-0.5 rounded-full text-xs font-semibold ${{variants[variant]}}`}}>{{children}}</span>;
+}}''',
+        "modal": f'''export function Modal({{ open, onClose, title, children, size = "md" }}) {{
+  const sizes = {{ sm: "max-w-sm", md: "max-w-lg", lg: "max-w-2xl", full: "max-w-full mx-4" }};
+  if (!open) return null;
+  return (
+    <div className="fixed inset-0 z-[1050] flex items-center justify-center" role="dialog" aria-modal="true">
+      <div className="fixed inset-0 bg-black/50 backdrop-blur-sm" onClick={{onClose}} />
+      <div className={{`relative bg-[{surface}] text-[{text_c}] rounded-2xl shadow-xl p-6 w-full ${{sizes[size]}} animate-in fade-in zoom-in-95`}}>
+        <div className="flex items-center justify-between mb-4">
+          <h2 className="text-lg font-semibold">{{title}}</h2>
+          <button onClick={{onClose}} className="p-1 rounded-md hover:bg-[{border}]" aria-label="Close">&times;</button>
+        </div>
+        {{children}}
+      </div>
+    </div>
+  );
+}}''',
+        "avatar": f'''export function Avatar({{ src, alt, fallback, size = "md" }}) {{
+  const sizes = {{ xs: "w-6 h-6 text-xs", sm: "w-8 h-8 text-sm", md: "w-10 h-10 text-base", lg: "w-14 h-14 text-xl", xl: "w-20 h-20 text-2xl" }};
+  return (
+    <div className={{`rounded-full bg-[{primary}] text-white flex items-center justify-center font-semibold overflow-hidden ${{sizes[size]}}`}}>
+      {{src ? <img src={{src}} alt={{alt}} className="w-full h-full object-cover" /> : (fallback || "?")}}
+    </div>
+  );
+}}''',
+        "toast": f'''export function Toast({{ message, variant = "info", onDismiss }}) {{
+  const icons = {{ info: "ℹ", success: "✓", warning: "⚠", error: "✕" }};
+  const colors = {{ info: "{primary}", success: "#22c55e", warning: "#f59e0b", error: "#ef4444" }};
+  return (
+    <div className="flex items-center gap-3 bg-[{surface}] border border-[{border}] rounded-lg p-4 shadow-lg max-w-[360px]" style={{{{ borderLeftColor: colors[variant], borderLeftWidth: 4 }}}} role="alert">
+      <span style={{{{ color: colors[variant] }}}}>{{icons[variant]}}</span>
+      <span className="flex-1 text-sm text-[{text_c}]">{{message}}</span>
+      {{onDismiss && <button onClick={{onDismiss}} className="text-[{text_c}]/50 hover:text-[{text_c}]" aria-label="Dismiss">&times;</button>}}
+    </div>
+  );
+}}''',
+        "tabs": f'''export function Tabs({{ tabs, activeTab, onChange, variant = "underline" }}) {{
+  const base = "px-4 py-2 text-sm font-medium transition-colors";
+  const styles = {{
+    underline: {{ active: "border-b-2 border-[{primary}] text-[{primary}]", idle: "text-[{text_c}]/60 hover:text-[{text_c}] border-b-2 border-transparent" }},
+    pill: {{ active: "bg-[{primary}] text-white rounded-full", idle: "text-[{text_c}]/60 hover:bg-[{surface}] rounded-full" }},
+    enclosed: {{ active: "bg-[{surface}] border border-[{border}] border-b-0 rounded-t-lg text-[{text_c}]", idle: "text-[{text_c}]/60 hover:text-[{text_c}]" }},
+  }};
+  return (
+    <div className="flex gap-1" role="tablist">
+      {{tabs.map(t => <button key={{t.key}} role="tab" aria-selected={{t.key === activeTab}} onClick={{() => onChange(t.key)}} className={{`${{base}} ${{t.key === activeTab ? styles[variant].active : styles[variant].idle}} ${{t.disabled ? "opacity-50 cursor-not-allowed" : ""}}`}} disabled={{t.disabled}}>{{t.label}}</button>)}}
+    </div>
+  );
+}}''',
+        "nav": f'''export function Nav({{ items, variant = "horizontal" }}) {{
+  const layouts = {{ horizontal: "flex items-center gap-6 h-16 px-6", vertical: "flex flex-col gap-1 py-4", sidebar: "flex flex-col gap-1 py-4 w-[260px] min-h-screen border-r border-[{border}]" }};
+  return (
+    <nav className={{`bg-[{surface}] text-[{text_c}] ${{layouts[variant]}}`}}>
+      {{items.map((item, i) => <a key={{i}} href={{item.href}} className={{`px-3 py-2 rounded-md text-sm font-medium transition-colors hover:bg-[{primary}]/10 hover:text-[{primary}] ${{item.active ? "bg-[{primary}]/10 text-[{primary}]" : ""}}`}}>{{item.label}}</a>)}}
+    </nav>
+  );
+}}''',
+        "table": f'''export function Table({{ columns, rows, variant = "striped", size = "default" }}) {{
+  const cellPad = {{ compact: "px-3 py-2 text-sm", default: "px-4 py-3", spacious: "px-6 py-4" }};
+  return (
+    <div className="overflow-x-auto rounded-lg border border-[{border}]">
+      <table className="w-full text-left text-[{text_c}]">
+        <thead className="bg-[{surface}] border-b border-[{border}]">
+          <tr>{{columns.map((col, i) => <th key={{i}} className={{`${{cellPad[size]}} font-semibold text-sm`}}>{{col.label}}</th>)}}</tr>
+        </thead>
+        <tbody>
+          {{rows.map((row, ri) => <tr key={{ri}} className={{`border-b border-[{border}] last:border-0 ${{variant === "striped" && ri % 2 ? "bg-[{surface}]/50" : ""}}`}}>{{columns.map((col, ci) => <td key={{ci}} className={{cellPad[size]}}>{{row[col.key]}}</td>)}}</tr>)}}
+        </tbody>
+      </table>
+    </div>
+  );
+}}''',
+    }
+    return _react.get(name, f"// {name} component — apply tokens via Tailwind config")
 
 
 def tool_create_component(args: dict) -> dict:
@@ -497,31 +640,105 @@ def tool_render_visual(args: dict) -> dict:
 
 def tool_design_critique(args: dict) -> dict:
     tokens = args.get("tokens", {})
+    html = args.get("html", "")
     issues = []
 
-    if tokens.get("text") and tokens.get("background"):
-        ratio = _contrast_ratio(tokens["text"], tokens["background"])
-        if ratio < 4.5:
-            issues.append({"severity": "error", "rule": "contrast", "detail": f"text/background contrast {ratio}:1 fails WCAG AA (need 4.5:1)", "fix": "Darken text or lighten background"})
-        elif ratio < 7.0:
-            issues.append({"severity": "warning", "rule": "contrast", "detail": f"text/background contrast {ratio}:1 passes AA but fails AAA (need 7.0:1)"})
+    _CONTRAST_PAIRS = [
+        ("text", "background", 4.5, "AA text"),
+        ("text", "surface", 4.5, "AA text on surface"),
+        ("primary", "background", 3.0, "UI element"),
+        ("primary", "surface", 3.0, "UI element on surface"),
+        ("error", "background", 3.0, "error indicator"),
+        ("success", "background", 3.0, "success indicator"),
+        ("warning", "background", 3.0, "warning indicator"),
+    ]
+    for fg_key, bg_key, threshold, label in _CONTRAST_PAIRS:
+        fg, bg = tokens.get(fg_key), tokens.get(bg_key)
+        if fg and bg and _valid_hex(fg) and _valid_hex(bg):
+            ratio = _contrast_ratio(fg, bg)
+            if ratio < threshold:
+                issues.append({"severity": "error", "rule": "contrast", "detail": f"{fg_key}/{bg_key} contrast {ratio}:1 fails {label} (need {threshold}:1)", "fix": f"Adjust {fg_key} or {bg_key} for {threshold}:1 minimum"})
+            elif threshold >= 4.5 and ratio < 7.0:
+                issues.append({"severity": "warning", "rule": "contrast-aaa", "detail": f"{fg_key}/{bg_key} contrast {ratio}:1 passes AA but fails AAA (7.0:1)"})
 
     if tokens.get("primary") and tokens.get("background"):
-        ratio = _contrast_ratio(tokens["primary"], tokens["background"])
-        if ratio < 3.0:
-            issues.append({"severity": "error", "rule": "contrast", "detail": f"primary/background contrast {ratio}:1 too low for UI elements (need 3:1)"})
+        for deficiency in ("protanopia", "deuteranopia", "tritanopia"):
+            sim_p = _simulate_cvd(tokens["primary"], deficiency)
+            sim_bg = _simulate_cvd(tokens["background"], deficiency)
+            ratio = _contrast_ratio(sim_p, sim_bg)
+            if ratio < 3.0:
+                issues.append({"severity": "warning", "rule": "cvd", "detail": f"primary/background fails 3:1 under {deficiency} ({ratio}:1)", "fix": "Increase lightness/saturation difference between primary and background"})
+
+    if tokens.get("primary") and tokens.get("secondary"):
+        dist = _color_distance(tokens["primary"], tokens["secondary"])
+        if dist < 40:
+            issues.append({"severity": "warning", "rule": "color-distinction", "detail": f"primary/secondary too similar (distance={dist:.0f}, need >40)", "fix": "Increase hue or lightness separation"})
+
+    if tokens.get("primary") and tokens.get("error"):
+        dist = _color_distance(tokens["primary"], tokens["error"])
+        if dist < 60:
+            issues.append({"severity": "error", "rule": "color-confusion", "detail": f"primary and error too similar (distance={dist:.0f}) — users can't tell actions from errors", "fix": "Use a distinctly different hue for error"})
 
     spacing = tokens.get("spacing", [])
     if spacing and isinstance(spacing, list):
         for i in range(1, len(spacing)):
-            if spacing[i] <= spacing[i-1]:
-                issues.append({"severity": "error", "rule": "spacing-scale", "detail": f"Spacing scale not monotonically increasing at index {i}"})
+            if spacing[i] <= spacing[i - 1]:
+                issues.append({"severity": "error", "rule": "spacing-monotonic", "detail": f"Spacing scale not monotonically increasing at index {i}: {spacing[i-1]} >= {spacing[i]}"})
                 break
+        if len(spacing) >= 3:
+            ratios = [spacing[i] / spacing[i - 1] for i in range(1, len(spacing)) if spacing[i - 1] > 0]
+            if ratios:
+                avg_ratio = sum(ratios) / len(ratios)
+                for i, r in enumerate(ratios):
+                    if abs(r - avg_ratio) > avg_ratio * 0.6:
+                        issues.append({"severity": "warning", "rule": "spacing-consistency", "detail": f"Spacing jump at index {i+1} ({spacing[i]}->{spacing[i+1]}) breaks the scale rhythm (ratio {r:.2f} vs avg {avg_ratio:.2f})"})
+                        break
 
+    type_scale = tokens.get("type_scale", {})
+    if type_scale and isinstance(type_scale, dict):
+        sizes = list(type_scale.values())
+        for i in range(1, len(sizes)):
+            if sizes[i] <= sizes[i - 1]:
+                issues.append({"severity": "error", "rule": "type-scale-monotonic", "detail": f"Type scale not increasing: {sizes[i-1]}px >= {sizes[i]}px"})
+                break
+        if sizes:
+            base = [s for s in sizes if 15 <= s <= 18]
+            if not base:
+                issues.append({"severity": "warning", "rule": "type-base-size", "detail": "No base size in 15-18px range — body text may be too small or too large"})
+            if min(sizes) < 11:
+                issues.append({"severity": "error", "rule": "type-minimum", "detail": f"Smallest type size {min(sizes)}px below 11px minimum — unreadable on most screens"})
+
+    border_radius = tokens.get("border_radius", {})
+    if border_radius and isinstance(border_radius, dict):
+        vals = [v for v in border_radius.values() if isinstance(v, (int, float)) and v < 9999]
+        if vals and max(vals) > 24:
+            issues.append({"severity": "warning", "rule": "radius-excessive", "detail": f"Max border-radius {max(vals)}px is very large — may look inconsistent at small sizes"})
+
+    for color_key in ("primary", "secondary", "accent", "text", "background", "surface", "border"):
+        c = tokens.get(color_key)
+        if c and isinstance(c, str) and not _valid_hex(c):
+            issues.append({"severity": "error", "rule": "invalid-color", "detail": f"'{color_key}' value '{c}' is not a valid hex color"})
+
+    if html:
+        if '<img' in html and 'alt=' not in html:
+            issues.append({"severity": "error", "rule": "img-alt", "detail": "Image(s) missing alt attribute", "fix": "Add descriptive alt text to all <img> elements"})
+        if '<html' in html and 'lang=' not in html:
+            issues.append({"severity": "warning", "rule": "html-lang", "detail": "Missing lang attribute on <html>", "fix": "Add lang='en' (or appropriate language) to <html>"})
+        if '<a' in html and 'href="#"' in html:
+            issues.append({"severity": "warning", "rule": "placeholder-links", "detail": "Placeholder href='#' links found — replace with real URLs before shipping"})
+        if 'onclick' in html.lower() or 'onmouseover' in html.lower():
+            issues.append({"severity": "warning", "rule": "inline-handlers", "detail": "Inline event handlers found — prefer addEventListener or framework bindings"})
+
+    errors = sum(1 for i in issues if i["severity"] == "error")
+    warnings = sum(1 for i in issues if i["severity"] == "warning")
     if not issues:
-        issues.append({"severity": "pass", "rule": "all", "detail": "No issues found — tokens pass basic design quality checks"})
+        issues.append({"severity": "pass", "rule": "all", "detail": "All checks passed"})
 
-    return {"issues": issues, "score": "pass" if all(i["severity"] != "error" for i in issues) else "fail"}
+    return {
+        "issues": issues,
+        "summary": {"errors": errors, "warnings": warnings, "total": len(issues)},
+        "score": "pass" if errors == 0 else "fail",
+    }
 
 
 # ── MCP Tool Registry ──
@@ -563,8 +780,8 @@ TOOLS = {
         "handler": tool_render_visual,
     },
     "design_critique": {
-        "description": "Critique a set of design tokens for accessibility, contrast, spacing consistency, and common design mistakes.",
-        "inputSchema": {"type": "object", "properties": {"tokens": {"type": "object", "description": "Design tokens to critique (color roles, spacing array, etc.)"}}, "required": ["tokens"]},
+        "description": "Enterprise design audit: 15+ rules covering WCAG contrast (all pairs), color vision deficiency, color distinction, spacing/type scale validation, border radius, invalid colors, HTML accessibility (img alt, lang, placeholder links, inline handlers).",
+        "inputSchema": {"type": "object", "properties": {"tokens": {"type": "object", "description": "Design tokens: color roles, spacing array, type_scale, border_radius"}, "html": {"type": "string", "description": "Optional HTML to audit for accessibility issues"}}, "required": ["tokens"]},
         "handler": tool_design_critique,
     },
 }
