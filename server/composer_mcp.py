@@ -1,9 +1,8 @@
 #!/usr/bin/env python3
-"""Composer MCP server (stdio) — design system MCP for all things design.
+"""Composer MCP v2 — design system MCP with Paul Rand brand discipline.
 
-8 tools:
-  palette, brand_guidelines, generate_design_system, create_component,
-  compose_page, export, render_visual, design_critique
+9 tools: palette, brand_guidelines, generate_design_system, create_component,
+  compose_page, export, render_visual, design_critique, export_tokens
 
 Speaks MCP over stdio (JSON-RPC 2.0, newline-delimited).
 Optional aivision bridge for image rendering (AIVISION_URL env var).
@@ -74,11 +73,6 @@ def _color_distance(c1: str, c2: str) -> float:
     return math.sqrt((r1 - r2) ** 2 + (g1 - g2) ** 2 + (b1 - b2) ** 2)
 
 
-_BREAKPOINTS = {"sm": 640, "md": 768, "lg": 1024, "xl": 1280, "2xl": 1536}
-_Z_INDEX = {"dropdown": 1000, "sticky": 1020, "fixed": 1030, "modal-backdrop": 1040, "modal": 1050, "popover": 1060, "tooltip": 1070, "toast": 1080}
-_TRANSITIONS = {"fast": "150ms ease", "normal": "200ms ease", "slow": "300ms ease-out", "spring": "500ms cubic-bezier(0.34,1.56,0.64,1)"}
-
-
 def _relative_luminance(hex_color: str) -> float:
     hex_color = hex_color.lstrip("#")
     rgb = [int(hex_color[i : i + 2], 16) / 255.0 for i in (0, 2, 4)]
@@ -92,117 +86,134 @@ def _contrast_ratio(fg: str, bg: str) -> float:
     return round((lighter + 0.05) / (darker + 0.05), 2)
 
 
+# ── Constants ──
+
+_BREAKPOINTS = {"sm": 640, "md": 768, "lg": 1024, "xl": 1280, "2xl": 1536}
+_Z_INDEX = {"dropdown": 1000, "sticky": 1020, "fixed": 1030, "modal-backdrop": 1040, "modal": 1050, "popover": 1060, "tooltip": 1070, "toast": 1080}
+_TRANSITIONS = {"fast": "150ms ease", "normal": "200ms ease", "slow": "300ms ease-out", "spring": "500ms cubic-bezier(0.34,1.56,0.64,1)"}
+
+_MOTION_TOKENS = {
+    "easing": {
+        "mark": "cubic-bezier(0.22, 1, 0.36, 1)",
+        "page": "ease-out",
+        "spring": "cubic-bezier(0.34, 1.56, 0.64, 1)",
+        "smooth": "ease-in-out",
+    },
+    "duration": {
+        "micro": 120,
+        "settle": 240,
+        "land": 320,
+        "draw": 400,
+        "reveal": 520,
+        "count": 960,
+    },
+}
+
+_ANIMATION_PRESETS = {
+    "reveal-in": "@keyframes reveal-in { from { opacity:0; transform:translateY(18px) } to { opacity:1; transform:translateY(0) } }",
+    "fold-open": "@keyframes fold-open { from { max-height:0; opacity:0 } to { max-height:500px; opacity:1 } }",
+    "bar-grow": "@keyframes bar-grow { from { width:0 } to { width:var(--bar-size) } }",
+    "core-land": "@keyframes core-land { 0% { transform:scale(0) } 70% { transform:scale(1.18) } 100% { transform:scale(1) } }",
+    "live-pulse": "@keyframes live-pulse { 0%,100% { transform:scale(1); opacity:0.92 } 50% { transform:scale(1.12); opacity:1 } }",
+    "row-settle": "@keyframes row-settle { from { opacity:0; transform:translateY(14px) } to { opacity:1; transform:translateY(0) } }",
+    "sweep-in": "@keyframes sweep-in { from { transform:translateX(-100%); opacity:0 } to { transform:translateX(0); opacity:1 } }",
+    "ring-draw": "@keyframes ring-draw { to { stroke-dashoffset:0 } }",
+}
+
+_SHADOW_PAIRS = {
+    "sm": {
+        "rest": "0 1px 2px rgba(0,0,0,0.04), 0 4px 8px -4px rgba(0,0,0,0.06)",
+        "hover": "0 2px 4px rgba(0,0,0,0.05), 0 12px 24px -8px rgba(0,0,0,0.12)",
+    },
+    "md": {
+        "rest": "0 1px 2px rgba(0,0,0,0.04), 0 6px 16px -8px rgba(0,0,0,0.10)",
+        "hover": "0 2px 4px rgba(0,0,0,0.05), 0 18px 40px -16px rgba(0,0,0,0.20)",
+    },
+    "lg": {
+        "rest": "0 4px 8px rgba(0,0,0,0.06), 0 16px 32px -12px rgba(0,0,0,0.14)",
+        "hover": "0 8px 16px rgba(0,0,0,0.08), 0 32px 64px -16px rgba(0,0,0,0.24)",
+    },
+}
+
+_COLOR_USAGE_RULES = {
+    "accent": {"allowed": ["cta", "link", "focus-ring", "badge"], "forbidden": ["field-fill", "background", "large-surface"]},
+    "error": {"allowed": ["badge", "border-left", "icon", "text"], "forbidden": ["field-fill", "primary-button", "background"]},
+    "signal": {"allowed": ["mark", "rule", "cross", "indicator"], "forbidden": ["field", "background", "large-surface"]},
+    "warning": {"allowed": ["badge", "border", "icon"], "forbidden": ["primary-button", "heading"]},
+    "success": {"allowed": ["badge", "border", "icon", "indicator"], "forbidden": ["primary-button", "heading"]},
+}
+
+_BRAND_PRESETS = {
+    "restrained": {
+        "description": "Restrained, evidence-based. Mono for data, serif for display. Signal colors for marks only. One animated element maximum.",
+        "type_pair": ("Space Grotesk", "JetBrains Mono", 1.5),
+        "color_philosophy": "Signal red for marks/rules/crosses only, never fields. Accent for CTAs only.",
+        "motion_philosophy": "minimal",
+        "radius": {"sm": 4, "md": 8, "lg": 8, "xl": 8, "full": 9999},
+        "type_constraints": {"display_max_lines": 1, "display_min_size": 28, "display_caps": False, "display_letterspacing": False, "body_min_size": 14, "label_face": "mono"},
+    },
+    "editorial": {
+        "description": "Warm, narrative, generous whitespace. Serif headlines, sans body.",
+        "type_pair": ("Playfair Display", "Source Sans 3", 1.6),
+        "color_philosophy": "Muted palette with one accent for emphasis. Warm neutrals.",
+        "motion_philosophy": "measured",
+        "radius": {"sm": 4, "md": 8, "lg": 12, "xl": 16, "full": 9999},
+        "type_constraints": {"display_max_lines": 2, "display_min_size": 24, "display_caps": False, "display_letterspacing": False, "body_min_size": 16, "label_face": "sans"},
+    },
+    "utilitarian": {
+        "description": "Clean, dense, functional. Sans heading and body.",
+        "type_pair": ("Inter", "Inter", 1.5),
+        "color_philosophy": "Functional color roles. Blue for actions, red for errors, green for success.",
+        "motion_philosophy": "standard",
+        "radius": {"sm": 4, "md": 8, "lg": 12, "xl": 16, "full": 9999},
+        "type_constraints": {"display_max_lines": 3, "display_min_size": 20, "display_caps": True, "display_letterspacing": True, "body_min_size": 14, "label_face": "sans"},
+    },
+    "playful": {
+        "description": "Rounded, bouncy, approachable. Spring easing, large radii.",
+        "type_pair": ("Nunito", "Nunito", 1.6),
+        "color_philosophy": "Vibrant, saturated palette. Multiple accent colors allowed.",
+        "motion_philosophy": "expressive",
+        "radius": {"sm": 8, "md": 12, "lg": 16, "xl": 24, "full": 9999},
+        "type_constraints": {"display_max_lines": 3, "display_min_size": 20, "display_caps": True, "display_letterspacing": True, "body_min_size": 14, "label_face": "sans"},
+    },
+    "technical": {
+        "description": "Precise, monospaced, minimal. Data-first.",
+        "type_pair": ("JetBrains Mono", "JetBrains Mono", 1.45),
+        "color_philosophy": "Neutral ground, monochrome data. Color only for state changes.",
+        "motion_philosophy": "minimal",
+        "radius": {"sm": 2, "md": 4, "lg": 6, "xl": 8, "full": 9999},
+        "type_constraints": {"display_max_lines": 2, "display_min_size": 18, "display_caps": True, "display_letterspacing": True, "body_min_size": 13, "label_face": "mono"},
+    },
+}
+
 _CONTEXT_HUES = {
     "fintech": 215, "healthcare": 165, "dashboard": 230,
     "ecommerce": 20, "editorial": 15, "developer": 260,
     "saas": 225, "social": 200, "gaming": 280, "education": 145,
 }
 
-
-def _pick_base_hue(context: str) -> float:
-    cl = context.lower()
-    for keyword, hue in _CONTEXT_HUES.items():
-        if keyword in cl:
-            return hue
-    return sum(cl.encode()) % 360
-
-
-def _build_palette(context: str, mode: str, seed_color: str | None) -> dict:
-    base_hue = _pick_base_hue(context)
-    dark = mode in ("dark", "both")
-    primary = seed_color if seed_color else _hsl_to_hex(base_hue, 0.55, 0.50)
-    roles = {
-        "primary": primary,
-        "secondary": _hsl_to_hex((base_hue + 30) % 360, 0.45, 0.55),
-        "accent": _hsl_to_hex((base_hue + 150) % 360, 0.65, 0.55),
-        "background": _hsl_to_hex(base_hue, 0.15, 0.08) if dark else _hsl_to_hex(base_hue, 0.20, 0.98),
-        "surface": _hsl_to_hex(base_hue, 0.12, 0.12) if dark else _hsl_to_hex(base_hue, 0.10, 1.00),
-        "text": _hsl_to_hex(base_hue, 0.05, 0.95) if dark else _hsl_to_hex(base_hue, 0.20, 0.10),
-        "border": _hsl_to_hex(base_hue, 0.15, 0.22) if dark else _hsl_to_hex(base_hue, 0.15, 0.88),
-        "success": "#22c55e", "warning": "#f59e0b", "error": "#ef4444", "info": _hsl_to_hex(base_hue, 0.50, 0.55),
-    }
-    contrast_report = {}
-    for pair_name, (fg, bg) in [("text_on_background", ("text", "background")), ("text_on_surface", ("text", "surface")), ("primary_on_background", ("primary", "background"))]:
-        ratio = _contrast_ratio(roles[fg], roles[bg])
-        contrast_report[pair_name] = {"ratio": ratio, "wcag_aa": ratio >= 4.5, "wcag_aaa": ratio >= 7.0}
-    return {"name": f"{context.strip().title()} — {'dark' if dark else 'light'}", "roles": roles, "contrast_report": contrast_report}
-
+_TYPE_SCALE = {"xs": 12, "sm": 14, "base": 16, "lg": 18, "xl": 20, "2xl": 24, "3xl": 30, "4xl": 36, "5xl": 48}
+_SPACING_SCALE = [0, 4, 8, 12, 16, 20, 24, 32, 40, 48, 64, 80, 96]
 
 _TYPE_PAIRS = {
-    "editorial": ("Fraunces", "Source Serif Pro", 1.6),
-    "utilitarian": ("Inter", "IBM Plex Mono", 1.5),
-    "playful": ("Poppins", "Nunito", 1.6),
-    "technical": ("JetBrains Mono", "Inter", 1.4),
-}
-
-_SPACING_SCALE = [2, 4, 8, 12, 16, 20, 24, 32, 40, 48, 64, 80, 96, 128]
-
-_TYPE_SCALE = {
-    "xs": 12, "sm": 14, "base": 16, "lg": 18, "xl": 20,
-    "2xl": 24, "3xl": 30, "4xl": 36, "5xl": 48, "6xl": 60,
+    "editorial": ("Playfair Display", "Source Sans 3", 1.6),
+    "utilitarian": ("Inter", "Inter", 1.5),
+    "playful": ("Nunito", "Nunito", 1.6),
+    "technical": ("JetBrains Mono", "JetBrains Mono", 1.45),
+    "restrained": ("Space Grotesk", "JetBrains Mono", 1.5),
 }
 
 _COMPONENT_SPECS = {
-    "button": {
-        "variants": ["primary", "secondary", "outline", "ghost", "destructive"],
-        "sizes": {"sm": {"px": 12, "py": 6, "font": 14}, "md": {"px": 16, "py": 10, "font": 16}, "lg": {"px": 24, "py": 14, "font": 18}},
-        "states": ["default", "hover", "active", "focus", "disabled"],
-        "radius": 8,
-    },
-    "card": {
-        "variants": ["elevated", "outlined", "filled"],
-        "sizes": {"sm": {"p": 16}, "md": {"p": 24}, "lg": {"p": 32}},
-        "states": ["default", "hover", "selected"],
-        "radius": 12,
-    },
-    "input": {
-        "variants": ["outlined", "filled", "underlined"],
-        "sizes": {"sm": {"px": 12, "py": 8, "font": 14}, "md": {"px": 16, "py": 12, "font": 16}, "lg": {"px": 20, "py": 16, "font": 18}},
-        "states": ["default", "focus", "error", "disabled"],
-        "radius": 8,
-    },
-    "badge": {
-        "variants": ["solid", "outline", "soft"],
-        "sizes": {"sm": {"px": 6, "py": 2, "font": 11}, "md": {"px": 8, "py": 4, "font": 12}},
-        "states": ["default"],
-        "radius": 9999,
-    },
-    "modal": {
-        "variants": ["centered", "slideout"],
-        "sizes": {"sm": {"w": 400}, "md": {"w": 560}, "lg": {"w": 720}, "full": {"w": "100%"}},
-        "states": ["open", "closing"],
-        "radius": 16,
-    },
-    "nav": {
-        "variants": ["horizontal", "vertical", "sidebar"],
-        "sizes": {"compact": {"h": 48}, "default": {"h": 64}},
-        "states": ["default", "collapsed"],
-        "radius": 0,
-    },
-    "table": {
-        "variants": ["striped", "bordered", "minimal"],
-        "sizes": {"compact": {"cell_py": 8}, "default": {"cell_py": 12}, "spacious": {"cell_py": 16}},
-        "states": ["default", "loading", "empty"],
-        "radius": 8,
-    },
-    "avatar": {
-        "variants": ["circle", "rounded", "square"],
-        "sizes": {"xs": {"wh": 24}, "sm": {"wh": 32}, "md": {"wh": 40}, "lg": {"wh": 56}, "xl": {"wh": 80}},
-        "states": ["default", "loading"],
-        "radius": 9999,
-    },
-    "toast": {
-        "variants": ["info", "success", "warning", "error"],
-        "sizes": {"default": {"w": 360, "p": 16}},
-        "states": ["entering", "visible", "exiting"],
-        "radius": 8,
-    },
-    "tabs": {
-        "variants": ["underline", "pill", "enclosed"],
-        "sizes": {"sm": {"py": 8, "font": 14}, "md": {"py": 12, "font": 16}},
-        "states": ["default", "active", "disabled"],
-        "radius": 8,
-    },
+    "button": {"variants": ["primary", "secondary", "outline", "ghost", "destructive"], "sizes": {"sm": {"px": 12, "py": 6, "font": 14}, "md": {"px": 16, "py": 10, "font": 16}, "lg": {"px": 24, "py": 14, "font": 18}}, "states": ["default", "hover", "active", "focus", "disabled"], "radius": 8},
+    "card": {"variants": ["elevated", "outlined", "filled"], "sizes": {"sm": {"padding": 16}, "md": {"padding": 24}, "lg": {"padding": 32}}, "states": ["default", "hover"], "radius": 12},
+    "input": {"variants": ["outlined", "filled", "underlined"], "sizes": {"sm": {"px": 12, "py": 8, "font": 14}, "md": {"px": 16, "py": 12, "font": 16}, "lg": {"px": 20, "py": 16, "font": 18}}, "states": ["default", "focus", "error", "disabled"], "radius": 8},
+    "badge": {"variants": ["solid", "outline", "soft"], "sizes": {"sm": {"px": 6, "py": 2, "font": 11}, "md": {"px": 8, "py": 4, "font": 12}}, "states": ["default"], "radius": 9999},
+    "modal": {"variants": ["default", "fullscreen", "drawer"], "sizes": {"sm": {"max_width": 400}, "md": {"max_width": 560}, "lg": {"max_width": 720}}, "states": ["open", "closed"], "radius": 16},
+    "avatar": {"variants": ["circle", "rounded"], "sizes": {"xs": {"dim": 24}, "sm": {"dim": 32}, "md": {"dim": 40}, "lg": {"dim": 56}, "xl": {"dim": 80}}, "states": ["default"], "radius": 9999},
+    "toast": {"variants": ["info", "success", "warning", "error"], "sizes": {"default": {"max_width": 360}}, "states": ["visible", "dismissed"], "radius": 8},
+    "tabs": {"variants": ["underline", "pill", "enclosed"], "sizes": {"sm": {"py": 8, "font": 14}, "md": {"py": 12, "font": 16}}, "states": ["default", "active", "disabled"], "radius": 8},
+    "nav": {"variants": ["horizontal", "vertical", "sidebar"], "sizes": {"default": {"height": 64}}, "states": ["default", "active", "hover"], "radius": 8},
+    "table": {"variants": ["striped", "bordered", "minimal"], "sizes": {"compact": {"py": 8, "font": 14}, "default": {"py": 12, "font": 16}, "spacious": {"py": 16, "font": 16}}, "states": ["default", "hover", "selected"], "radius": 8},
 }
 
 _LAYOUT_PATTERNS = {
@@ -212,8 +223,65 @@ _LAYOUT_PATTERNS = {
     "pricing_table": '<section style="padding:64px 40px;background:{bg};color:{text};text-align:center"><h2 style="font-family:{heading};font-size:36px;margin-bottom:48px">{title}</h2><div style="display:flex;gap:24px;justify-content:center;flex-wrap:wrap">{plans}</div></section>',
     "dashboard": '<div style="display:grid;grid-template-columns:260px 1fr;grid-template-rows:64px 1fr;min-height:100vh"><header style="grid-column:1/-1;background:{surface};border-bottom:1px solid {border};display:flex;align-items:center;padding:0 24px;color:{text};font-family:{heading}">{header}</header><aside style="background:{surface};border-right:1px solid {border};padding:16px">{sidebar}</aside><main style="padding:24px;background:{bg};color:{text}">{main_content}</main></div>',
     "footer": '<footer style="padding:48px 40px;background:{surface};color:{text};border-top:1px solid {border}"><div style="display:flex;justify-content:space-between;max-width:1200px;margin:0 auto">{columns}</div></footer>',
+    "receipt_card": '<div style="display:grid;grid-template-columns:1.3fr 0.8fr;gap:20px;max-width:1000px"><div style="padding:24px;background:{surface};border:1px solid {border};border-radius:8px"><span style="font-family:monospace;font-size:11px;letter-spacing:0.18em;text-transform:uppercase;color:{text};opacity:0.5">{question_label}</span><div style="display:flex;align-items:end;gap:14px;margin:18px 0 16px"><span style="font-family:serif;font-size:clamp(3rem,6vw,4.8rem);line-height:0.9;color:{text}">{stat}</span><span style="font-family:monospace;font-size:11px;letter-spacing:0.16em;text-transform:uppercase;color:{text};opacity:0.5;padding-bottom:10px">{stat_label}</span></div><h3 style="font-family:{heading};color:{text};margin-bottom:12px">{title}</h3><p style="color:{text};opacity:0.62;max-width:720px">{subtitle}</p></div><div style="padding:24px;background:{surface};border:1px solid {border};border-radius:8px"><h3 style="font-family:{heading};color:{text};margin-bottom:12px">{receipt_title}</h3><ul style="list-style:none;display:grid;gap:12px;padding:0">{receipt_items}</ul></div></div>',
+    "chat_thread": '<div style="max-width:480px;display:flex;flex-direction:column;gap:14px;padding:18px 16px"><div style="align-self:flex-end;max-width:84%;padding:12px 14px;border-radius:16px 16px 6px 16px;background:{surface};border:1px solid {border};color:{text};opacity:0.62;font-size:14px">{question}</div><div style="padding:18px 16px;border-left:2px solid {primary};border-radius:6px 16px 16px 6px;background:{surface};border:1px solid {border};box-shadow:{shadow}"><h3 style="font-family:{heading};color:{text};margin-bottom:8px;font-size:18px">{title}</h3><p style="color:{text};opacity:0.62;font-size:14px;max-width:none">{subtitle}</p></div></div>',
+    "matrix_grid": '<div style="display:grid;grid-template-columns:repeat(3,1fr);gap:20px;max-width:1200px">{cells}</div>',
+    "card_stack": '<div style="position:relative;width:320px;height:240px">{stack_cards}</div>',
 }
 
+
+# ── Palette builder ──
+
+def _build_palette(context: str, mode: str, seed_color: str | None) -> dict:
+    ctx_lower = context.lower()
+    hue = 220
+    for keyword, h in _CONTEXT_HUES.items():
+        if keyword in ctx_lower:
+            hue = h
+            break
+    else:
+        hue = sum(ord(c) for c in context) % 360
+
+    if seed_color and _valid_hex(seed_color):
+        r, g, b = _hex_to_rgb(seed_color.lstrip("#"))
+        h_norm, _, _ = colorsys.rgb_to_hls(r / 255.0, g / 255.0, b / 255.0)
+        hue = round(h_norm * 360)
+
+    if mode == "dark":
+        roles = {
+            "primary": _hsl_to_hex(hue, 0.7, 0.55),
+            "secondary": _hsl_to_hex((hue + 30) % 360, 0.5, 0.45),
+            "accent": _hsl_to_hex((hue + 180) % 360, 0.65, 0.55),
+            "background": _hsl_to_hex(hue, 0.15, 0.08),
+            "surface": _hsl_to_hex(hue, 0.12, 0.12),
+            "text": "#f5f5f5",
+            "border": _hsl_to_hex(hue, 0.1, 0.2),
+            "error": "#ef4444",
+            "success": "#16a34a",
+            "warning": "#d97706",
+        }
+    else:
+        roles = {
+            "primary": _hsl_to_hex(hue, 0.65, 0.45),
+            "secondary": _hsl_to_hex((hue + 30) % 360, 0.45, 0.55),
+            "accent": _hsl_to_hex((hue + 180) % 360, 0.6, 0.5),
+            "background": "#ffffff",
+            "surface": "#f9fafb",
+            "text": "#111827",
+            "border": "#e5e7eb",
+            "error": "#dc2626",
+            "success": "#16a34a",
+            "warning": "#d97706",
+        }
+
+    if seed_color and _valid_hex(seed_color):
+        roles["primary"] = _sanitize_hex(seed_color)
+
+    contrast = _contrast_ratio(roles["primary"], roles["background"])
+    return {"mode": mode, "roles": roles, "primary_contrast": {"ratio": contrast, "passes_aa_large": contrast >= 3.0, "passes_aa": contrast >= 4.5}}
+
+
+# ── Aivision bridge ──
 
 def _aivision_post(path: str, body: dict) -> dict | None:
     if not HAS_HTTPX:
@@ -229,6 +297,8 @@ def _aivision_post(path: str, body: dict) -> dict | None:
         return None
 
 
+# ── Token export formats ──
+
 def _tokens_to_css(tokens: dict) -> str:
     lines = [":root {"]
     for role, val in tokens.get("color", {}).items():
@@ -241,8 +311,100 @@ def _tokens_to_css(tokens: dict) -> str:
         lines.append(f"  --font-heading: '{tokens['heading_font']}', sans-serif;")
     if tokens.get("body_font"):
         lines.append(f"  --font-body: '{tokens['body_font']}', sans-serif;")
+    for name, val in _MOTION_TOKENS["easing"].items():
+        lines.append(f"  --ease-{name}: {val};")
+    for name, ms in _MOTION_TOKENS["duration"].items():
+        lines.append(f"  --{name}: {ms}ms;")
+    for size, pair in _SHADOW_PAIRS.items():
+        lines.append(f"  --shadow-{size}: {pair['rest']};")
+        lines.append(f"  --shadow-{size}-hover: {pair['hover']};")
+    lines.append("}")
+    lines.append("")
+    for name, keyframe in _ANIMATION_PRESETS.items():
+        lines.append(keyframe)
+    lines.append("")
+    lines.append("@media (prefers-reduced-motion: reduce) {")
+    lines.append("  *, *::before, *::after {")
+    lines.append("    animation-duration: 0.01ms !important;")
+    lines.append("    animation-iteration-count: 1 !important;")
+    lines.append("    transition-duration: 0.01ms !important;")
+    lines.append("  }")
     lines.append("}")
     return "\n".join(lines)
+
+
+def _tokens_to_tailwind(tokens: dict) -> str:
+    colors = {}
+    for role, val in tokens.get("color", {}).items():
+        colors[role] = val
+    spacing = {}
+    for i, s in enumerate(tokens.get("spacing", _SPACING_SCALE)):
+        spacing[str(i)] = f"{s}px"
+    font_size = {}
+    for name, px in tokens.get("type_scale", _TYPE_SCALE).items():
+        font_size[name] = f"{px}px"
+    shadow = {}
+    for size, pair in _SHADOW_PAIRS.items():
+        shadow[size] = pair["rest"]
+        shadow[f"{size}-hover"] = pair["hover"]
+    transition_timing = {}
+    for name, val in _MOTION_TOKENS["easing"].items():
+        transition_timing[name] = val
+    transition_duration = {}
+    for name, ms in _MOTION_TOKENS["duration"].items():
+        transition_duration[name] = f"{ms}ms"
+    config = {
+        "theme": {
+            "extend": {
+                "colors": colors,
+                "spacing": spacing,
+                "fontSize": font_size,
+                "boxShadow": shadow,
+                "transitionTimingFunction": transition_timing,
+                "transitionDuration": transition_duration,
+                "fontFamily": {},
+            }
+        }
+    }
+    if tokens.get("heading_font"):
+        config["theme"]["extend"]["fontFamily"]["heading"] = [tokens["heading_font"], "sans-serif"]
+    if tokens.get("body_font"):
+        config["theme"]["extend"]["fontFamily"]["body"] = [tokens["body_font"], "sans-serif"]
+    return f"module.exports = {json.dumps(config, indent=2)}"
+
+
+def _tokens_to_figma(tokens: dict) -> str:
+    figma = {}
+    for role, val in tokens.get("color", {}).items():
+        figma[f"color/{role}"] = {"value": val, "type": "color"}
+    for name, px in tokens.get("type_scale", _TYPE_SCALE).items():
+        figma[f"fontSize/{name}"] = {"value": px, "type": "fontSizes"}
+    for i, s in enumerate(tokens.get("spacing", _SPACING_SCALE)):
+        figma[f"spacing/{i}"] = {"value": s, "type": "spacing"}
+    for size, pair in _SHADOW_PAIRS.items():
+        figma[f"shadow/{size}"] = {"value": pair["rest"], "type": "boxShadow"}
+        figma[f"shadow/{size}-hover"] = {"value": pair["hover"], "type": "boxShadow"}
+    for name, ms in _MOTION_TOKENS["duration"].items():
+        figma[f"motion/{name}"] = {"value": f"{ms}ms", "type": "duration"}
+    return json.dumps(figma, indent=2)
+
+
+def _tokens_to_style_dictionary(tokens: dict) -> str:
+    sd = {"color": {}, "size": {"font": {}, "spacing": {}}, "shadow": {}, "motion": {"duration": {}, "easing": {}}}
+    for role, val in tokens.get("color", {}).items():
+        sd["color"][role] = {"value": val}
+    for name, px in tokens.get("type_scale", _TYPE_SCALE).items():
+        sd["size"]["font"][name] = {"value": px}
+    for i, s in enumerate(tokens.get("spacing", _SPACING_SCALE)):
+        sd["size"]["spacing"][str(i)] = {"value": s}
+    for size, pair in _SHADOW_PAIRS.items():
+        sd["shadow"][size] = {"value": pair["rest"]}
+        sd["shadow"][f"{size}_hover"] = {"value": pair["hover"]}
+    for name, ms in _MOTION_TOKENS["duration"].items():
+        sd["motion"]["duration"][name] = {"value": f"{ms}ms"}
+    for name, val in _MOTION_TOKENS["easing"].items():
+        sd["motion"]["easing"][name] = {"value": val}
+    return json.dumps(sd, indent=2)
 
 
 # ── Tool: palette ──
@@ -270,38 +432,67 @@ def tool_palette(args: dict) -> dict:
 def tool_brand_guidelines(args: dict) -> dict:
     product_description = args["product_description"]
     tone = args.get("tone", "utilitarian")
+    preset_name = args.get("preset", tone if tone in _BRAND_PRESETS else "utilitarian")
+    preset = _BRAND_PRESETS.get(preset_name, _BRAND_PRESETS["utilitarian"])
     palette = _build_palette(product_description, "both", None)
-    heading_font, body_font, line_height = _TYPE_PAIRS.get(tone, _TYPE_PAIRS["utilitarian"])
+    heading_font, body_font, line_height = preset["type_pair"]
+    tc = preset["type_constraints"]
+
     markdown = f"""# Brand Guidelines — {product_description.strip().title()}
 
+## Personality
+**{preset_name.title()}** — {preset['description']}
+
 ## Tone
-{tone.title()} — {"warm, narrative, generous whitespace" if tone == "editorial" else "clean, dense, functional" if tone == "utilitarian" else "friendly, rounded, approachable" if tone == "playful" else "precise, monospaced, minimal"}.
+{tone.title()} — {preset['color_philosophy']}
 
 ## Palette
 | Role | Hex |
 |---|---|
 """ + "\n".join(f"| {role} | `{hex_val}` |" for role, hex_val in palette["roles"].items()) + f"""
 
+## Color Usage Rules
+""" + "\n".join(f"- **{role}**: allowed in {', '.join(rules['allowed'])}; never in {', '.join(rules['forbidden'])}" for role, rules in _COLOR_USAGE_RULES.items()) + f"""
+
 ## Typography
 - Heading: **{heading_font}** / line-height {line_height}
 - Body: **{body_font}** / line-height {line_height + 0.1}
 - Scale: {', '.join(f'{k}={v}px' for k, v in _TYPE_SCALE.items())}
+- Display: max {tc['display_max_lines']} line(s), min {tc['display_min_size']}px{', never caps' if not tc['display_caps'] else ''}{', never letterspaced' if not tc['display_letterspacing'] else ''}
+- Labels: {tc['label_face']} face
 
 ## Spacing
 Scale (px): {', '.join(str(s) for s in _SPACING_SCALE)}
+
+## Motion
+Philosophy: **{preset['motion_philosophy']}**
+| Token | Duration |
+|---|---|
+""" + "\n".join(f"| {name} | {ms}ms |" for name, ms in _MOTION_TOKENS["duration"].items()) + """
+
+| Easing | Curve |
+|---|---|
+""" + "\n".join(f"| {name} | `{curve}` |" for name, curve in _MOTION_TOKENS["easing"].items()) + f"""
+
+## Shadows
+| Size | Resting | Hover |
+|---|---|---|
+""" + "\n".join(f"| {size} | `{pair['rest'][:40]}...` | `{pair['hover'][:40]}...` |" for size, pair in _SHADOW_PAIRS.items()) + """
 
 ## Do
 - Keep contrast at or above WCAG AA (4.5:1) for all body text.
 - Use the accent color sparingly — calls to action only.
 - Maintain consistent spacing from the scale — never ad-hoc pixel values.
+- Honor prefers-reduced-motion in all animations.
 
 ## Don't
 - Don't introduce a second accent color without a documented reason.
 - Don't set body text below 14px.
 - Don't mix type families outside the heading/body pair.
+- Don't use animations longer than 960ms without justification.
 """
     tokens = {"color": palette["roles"], "type": {"heading_font": heading_font, "body_font": body_font}, "spacing": {"scale": _SPACING_SCALE}}
-    return {"markdown": markdown, "tokens": tokens}
+    return {"markdown": markdown, "tokens": tokens, "preset": preset_name}
 
 
 # ── Tool: generate_design_system ──
@@ -310,8 +501,10 @@ def tool_generate_design_system(args: dict) -> dict:
     query = args["query"]
     treatment = args.get("treatment", "utilitarian")
     theme_aware = args.get("theme_aware", True)
+    preset_name = args.get("preset", treatment if treatment in _BRAND_PRESETS else "utilitarian")
+    preset = _BRAND_PRESETS.get(preset_name, _BRAND_PRESETS["utilitarian"])
 
-    heading_font, body_font, line_height = _TYPE_PAIRS.get(treatment, _TYPE_PAIRS["utilitarian"])
+    heading_font, body_font, line_height = preset["type_pair"]
 
     palettes = {}
     if theme_aware:
@@ -340,7 +533,10 @@ def tool_generate_design_system(args: dict) -> dict:
 
     first_palette = list(palettes.values())[0]
     tokens = {**first_palette["roles"], "heading_font": heading_font, "body_font": body_font, "type_scale": _TYPE_SCALE, "spacing": _SPACING_SCALE}
-    tokens_css = _tokens_to_css(tokens)
+    tokens_css = _tokens_to_css({"color": first_palette["roles"], "type_scale": _TYPE_SCALE, "spacing": _SPACING_SCALE, "heading_font": heading_font, "body_font": body_font})
+    tokens_tailwind = _tokens_to_tailwind({"color": first_palette["roles"], "type_scale": _TYPE_SCALE, "spacing": _SPACING_SCALE, "heading_font": heading_font, "body_font": body_font})
+    tokens_figma = _tokens_to_figma({"color": first_palette["roles"], "type_scale": _TYPE_SCALE, "spacing": _SPACING_SCALE})
+    tokens_style_dict = _tokens_to_style_dictionary({"color": first_palette["roles"], "type_scale": _TYPE_SCALE, "spacing": _SPACING_SCALE})
 
     cvd_report = {}
     for deficiency in ("protanopia", "deuteranopia", "tritanopia"):
@@ -351,25 +547,29 @@ def tool_generate_design_system(args: dict) -> dict:
 
     return {
         "design_system": {
+            "preset": preset_name,
+            "preset_description": preset["description"],
             "palette": palettes,
             "typography": typography,
+            "type_constraints": preset["type_constraints"],
             "spacing": {"scale": _SPACING_SCALE, "unit": "px"},
             "breakpoints": _BREAKPOINTS,
             "z_index": _Z_INDEX,
             "transitions": _TRANSITIONS,
+            "motion": _MOTION_TOKENS,
+            "animations": list(_ANIMATION_PRESETS.keys()),
+            "shadows": _SHADOW_PAIRS,
+            "color_usage_rules": _COLOR_USAGE_RULES,
             "grid": {"columns": 12, "gutter": 24, "margin": 16, "max_width": 1280},
-            "border_radius": {"sm": 4, "md": 8, "lg": 12, "xl": 16, "full": 9999},
-            "shadows": {
-                "sm": "0 1px 2px rgba(0,0,0,0.06)",
-                "md": "0 4px 6px rgba(0,0,0,0.07)",
-                "lg": "0 10px 15px rgba(0,0,0,0.1)",
-                "xl": "0 20px 25px rgba(0,0,0,0.15)",
-            },
+            "border_radius": preset["radius"],
             "components": components,
             "accessibility": accessibility,
             "color_vision_deficiency": cvd_report,
         },
         "tokens_css": tokens_css,
+        "tokens_tailwind": tokens_tailwind,
+        "tokens_figma": tokens_figma,
+        "tokens_style_dictionary": tokens_style_dict,
     }
 
 
@@ -385,15 +585,15 @@ def _component_html(name: str, spec: dict, tokens: dict) -> str:
     radius = spec.get("radius", 8)
 
     if name == "button":
-        return f'<button style="padding:10px 16px;background:{primary};color:#fff;border:none;border-radius:{radius}px;font-size:16px;cursor:pointer;font-weight:600;transition:opacity 0.15s" onmouseover="this.style.opacity=0.9" onmouseout="this.style.opacity=1">Button</button>'
+        return f'<button style="padding:10px 16px;background:{primary};color:#fff;border:none;border-radius:{radius}px;font-size:16px;cursor:pointer;font-weight:600;transition:opacity 150ms ease" onmouseover="this.style.opacity=0.9" onmouseout="this.style.opacity=1">Button</button>'
     if name == "card":
-        return f'<div style="background:{surface};border:1px solid {border};border-radius:{radius}px;padding:24px;color:{text}"><h3 style="margin:0 0 8px">Card Title</h3><p style="margin:0;opacity:0.7">Card description text goes here.</p></div>'
+        return f'<div style="background:{surface};border:1px solid {border};border-radius:{radius}px;padding:24px;color:{text};box-shadow:{_SHADOW_PAIRS["sm"]["rest"]};transition:box-shadow 240ms ease"><h3 style="margin:0 0 8px">Card Title</h3><p style="margin:0;opacity:0.7">Card description text goes here.</p></div>'
     if name == "input":
-        return f'<div><label style="display:block;margin-bottom:4px;font-size:14px;font-weight:500;color:{text}">Label</label><input type="text" placeholder="Placeholder" style="width:100%;padding:12px 16px;border:1px solid {border};border-radius:{radius}px;font-size:16px;background:{bg};color:{text};outline:none;box-sizing:border-box" onfocus="this.style.borderColor=\'{primary}\'" onblur="this.style.borderColor=\'{border}\'"></div>'
+        return f'<div><label style="display:block;margin-bottom:4px;font-size:14px;font-weight:500;color:{text}">Label</label><input type="text" placeholder="Placeholder" style="width:100%;padding:12px 16px;border:1px solid {border};border-radius:{radius}px;font-size:16px;background:{bg};color:{text};outline:none;box-sizing:border-box;transition:border-color 120ms ease" onfocus="this.style.borderColor=\'{primary}\'" onblur="this.style.borderColor=\'{border}\'"></div>'
     if name == "badge":
         return f'<span style="display:inline-block;padding:4px 8px;background:{primary};color:#fff;border-radius:{radius}px;font-size:12px;font-weight:600">Badge</span>'
     if name == "toast":
-        return f'<div style="padding:16px;background:{surface};border:1px solid {border};border-left:4px solid {primary};border-radius:{radius}px;color:{text};display:flex;align-items:center;gap:12px;max-width:360px"><span style="font-weight:500">Notification message</span></div>'
+        return f'<div style="padding:16px;background:{surface};border:1px solid {border};border-left:4px solid {primary};border-radius:{radius}px;color:{text};display:flex;align-items:center;gap:12px;max-width:360px;box-shadow:{_SHADOW_PAIRS["md"]["rest"]}"><span style="font-weight:500">Notification message</span></div>'
     if name == "avatar":
         return f'<div style="width:40px;height:40px;border-radius:{radius}px;background:{primary};color:#fff;display:flex;align-items:center;justify-content:center;font-weight:600;font-size:16px">JD</div>'
     return f'<div style="padding:16px;border:1px solid {border};border-radius:{radius}px;color:{text};background:{surface}"><!-- {name} component --></div>'
@@ -413,8 +613,8 @@ def _component_react(name: str, spec: dict, tokens: dict) -> str:
   return <button className={{`${{base}} ${{variants[variant]}} ${{sizes[size]}}`}} disabled={{disabled}} {{...props}}>{{children}}</button>;
 }}''',
         "card": f'''export function Card({{ children, variant = "elevated", className, ...props }}) {{
-  const variants = {{ elevated: "shadow-md bg-[{surface}]", outlined: "border border-[{border}] bg-[{surface}]", filled: "bg-[{surface}]" }};
-  return <div className={{`rounded-xl p-6 text-[{text_c}] ${{variants[variant]}} ${{className || ""}}`}} {{...props}}>{{children}}</div>;
+  const variants = {{ elevated: "shadow-md hover:shadow-lg bg-[{surface}]", outlined: "border border-[{border}] bg-[{surface}]", filled: "bg-[{surface}]" }};
+  return <div className={{`rounded-xl p-6 text-[{text_c}] transition-shadow duration-[240ms] ease-[cubic-bezier(0.22,1,0.36,1)] ${{variants[variant]}} ${{className || ""}}`}} {{...props}}>{{children}}</div>;
 }}''',
         "input": f'''export function Input({{ label, error, size = "md", variant = "outlined", ...props }}) {{
   const sizes = {{ sm: "px-3 py-2 text-sm", md: "px-4 py-3 text-base", lg: "px-5 py-4 text-lg" }};
@@ -422,7 +622,7 @@ def _component_react(name: str, spec: dict, tokens: dict) -> str:
   return (
     <div className="flex flex-col gap-1">
       {{label && <label className="text-sm font-medium text-[{text_c}]">{{label}}</label>}}
-      <input className={{`rounded-lg text-[{text_c}] outline-none transition-colors focus:border-[{primary}] focus:ring-2 focus:ring-[{primary}]/20 disabled:opacity-50 ${{sizes[size]}} ${{variants[variant]}} ${{error ? "border-red-500" : ""}}`}} {{...props}} />
+      <input className={{`rounded-lg text-[{text_c}] outline-none transition-colors duration-[120ms] focus:border-[{primary}] focus:ring-2 focus:ring-[{primary}]/20 disabled:opacity-50 ${{sizes[size]}} ${{variants[variant]}} ${{error ? "border-red-500" : ""}}`}} {{...props}} />
       {{error && <span className="text-sm text-red-500">{{error}}</span>}}
     </div>
   );
@@ -467,7 +667,7 @@ def _component_react(name: str, spec: dict, tokens: dict) -> str:
   );
 }}''',
         "tabs": f'''export function Tabs({{ tabs, activeTab, onChange, variant = "underline" }}) {{
-  const base = "px-4 py-2 text-sm font-medium transition-colors";
+  const base = "px-4 py-2 text-sm font-medium transition-colors duration-[120ms]";
   const styles = {{
     underline: {{ active: "border-b-2 border-[{primary}] text-[{primary}]", idle: "text-[{text_c}]/60 hover:text-[{text_c}] border-b-2 border-transparent" }},
     pill: {{ active: "bg-[{primary}] text-white rounded-full", idle: "text-[{text_c}]/60 hover:bg-[{surface}] rounded-full" }},
@@ -483,7 +683,7 @@ def _component_react(name: str, spec: dict, tokens: dict) -> str:
   const layouts = {{ horizontal: "flex items-center gap-6 h-16 px-6", vertical: "flex flex-col gap-1 py-4", sidebar: "flex flex-col gap-1 py-4 w-[260px] min-h-screen border-r border-[{border}]" }};
   return (
     <nav className={{`bg-[{surface}] text-[{text_c}] ${{layouts[variant]}}`}}>
-      {{items.map((item, i) => <a key={{i}} href={{item.href}} className={{`px-3 py-2 rounded-md text-sm font-medium transition-colors hover:bg-[{primary}]/10 hover:text-[{primary}] ${{item.active ? "bg-[{primary}]/10 text-[{primary}]" : ""}}`}}>{{item.label}}</a>)}}
+      {{items.map((item, i) => <a key={{i}} href={{item.href}} className={{`px-3 py-2 rounded-md text-sm font-medium transition-colors duration-[120ms] hover:bg-[{primary}]/10 hover:text-[{primary}] ${{item.active ? "bg-[{primary}]/10 text-[{primary}]" : ""}}`}}>{{item.label}}</a>)}}
     </nav>
   );
 }}''',
@@ -540,6 +740,7 @@ def tool_compose_page(args: dict) -> dict:
         "primary": tokens.get("primary", "#3b82f6"),
         "border": tokens.get("border", "#e5e7eb"),
         "heading": heading_font,
+        "shadow": _SHADOW_PAIRS["sm"]["rest"],
         "title": content.get("title", "Title"),
         "subtitle": content.get("subtitle", "Subtitle text goes here"),
         "cta": content.get("cta", "Get Started"),
@@ -550,6 +751,14 @@ def tool_compose_page(args: dict) -> dict:
         "features": content.get("features", "".join(f'<div style="padding:24px;background:{tokens.get("background","#fff")};border:1px solid {tokens.get("border","#e5e7eb")};border-radius:12px"><h3>Feature {i+1}</h3><p>Description</p></div>' for i in range(3))),
         "plans": content.get("plans", ""),
         "columns": content.get("columns", "<div>Footer content</div>"),
+        "question": content.get("question", "What does this do?"),
+        "question_label": content.get("question_label", "QUESTION"),
+        "stat": content.get("stat", "94%"),
+        "stat_label": content.get("stat_label", "ACCURACY"),
+        "receipt_title": content.get("receipt_title", "Details"),
+        "receipt_items": content.get("receipt_items", "<li>Item 1</li><li>Item 2</li>"),
+        "cells": content.get("cells", "".join(f'<div style="padding:24px;background:{tokens.get("surface","#f9fafb")};border:1px solid {tokens.get("border","#e5e7eb")};border-radius:8px"><h3>Cell {i+1}</h3></div>' for i in range(6))),
+        "stack_cards": content.get("stack_cards", ""),
     }
 
     matched = None
@@ -562,6 +771,9 @@ def tool_compose_page(args: dict) -> dict:
 
     body_html = _LAYOUT_PATTERNS[matched].format(**t)
 
+    motion_css = "\n".join(_ANIMATION_PRESETS.values())
+    reduced_motion = "@media (prefers-reduced-motion: reduce) { *, *::before, *::after { animation-duration: 0.01ms !important; transition-duration: 0.01ms !important; } }"
+
     html = f"""<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -573,6 +785,9 @@ def tool_compose_page(args: dict) -> dict:
 *{{margin:0;padding:0;box-sizing:border-box}}
 body{{font-family:'{tokens.get("body_font","Inter")}',sans-serif;background:{t['bg']};color:{t['text']}}}
 a{{color:{t['primary']};text-decoration:none}}
+:root{{--ease-mark:{_MOTION_TOKENS['easing']['mark']};--ease-page:{_MOTION_TOKENS['easing']['page']};--micro:{_MOTION_TOKENS['duration']['micro']}ms;--settle:{_MOTION_TOKENS['duration']['settle']}ms;--land:{_MOTION_TOKENS['duration']['land']}ms;--draw:{_MOTION_TOKENS['duration']['draw']}ms;--reveal:{_MOTION_TOKENS['duration']['reveal']}ms}}
+{motion_css}
+{reduced_motion}
 </style>
 </head>
 <body>
@@ -580,7 +795,7 @@ a{{color:{t['primary']};text-decoration:none}}
 </body>
 </html>"""
 
-    return {"html": html, "pattern": matched, "notes": f"Layout: {matched}, font: {heading_font}"}
+    return {"html": html, "pattern": matched, "notes": f"Layout: {matched}, font: {heading_font}, motion: semantic timing tokens"}
 
 
 # ── Tool: export ──
@@ -612,6 +827,24 @@ def tool_export(args: dict) -> dict:
     return {"error": "compose_host not configured" if target == "compose_host" else "unknown target"}
 
 
+# ── Tool: export_tokens ──
+
+def tool_export_tokens(args: dict) -> dict:
+    tokens = args.get("tokens", {})
+    fmt = args.get("format", "css")
+    exporters = {
+        "css": _tokens_to_css,
+        "tailwind": _tokens_to_tailwind,
+        "figma": _tokens_to_figma,
+        "style_dictionary": _tokens_to_style_dictionary,
+    }
+    exporter = exporters.get(fmt)
+    if not exporter:
+        return {"error": f"unknown format: {fmt}. Available: {', '.join(exporters.keys())}"}
+    output = exporter(tokens)
+    return {"format": fmt, "output": output, "size": len(output)}
+
+
 # ── Tool: render_visual (aivision bridge) ──
 
 def tool_render_visual(args: dict) -> dict:
@@ -641,6 +874,8 @@ def tool_render_visual(args: dict) -> dict:
 def tool_design_critique(args: dict) -> dict:
     tokens = args.get("tokens", {})
     html = args.get("html", "")
+    preset_name = args.get("preset")
+    preset = _BRAND_PRESETS.get(preset_name) if preset_name else None
     issues = []
 
     _CONTRAST_PAIRS = [
@@ -719,6 +954,15 @@ def tool_design_critique(args: dict) -> dict:
         if c and isinstance(c, str) and not _valid_hex(c):
             issues.append({"severity": "error", "rule": "invalid-color", "detail": f"'{color_key}' value '{c}' is not a valid hex color"})
 
+    durations = tokens.get("durations", {})
+    if durations and isinstance(durations, dict):
+        for name, ms in durations.items():
+            if isinstance(ms, (int, float)):
+                if ms > 2000:
+                    issues.append({"severity": "error", "rule": "motion-duration", "detail": f"Animation '{name}' at {ms}ms exceeds 2000ms max", "fix": "Keep animations under 1000ms for responsiveness"})
+                elif ms > 1000:
+                    issues.append({"severity": "warning", "rule": "motion-duration", "detail": f"Animation '{name}' at {ms}ms is slow — consider reducing to under 1000ms"})
+
     if html:
         if '<img' in html and 'alt=' not in html:
             issues.append({"severity": "error", "rule": "img-alt", "detail": "Image(s) missing alt attribute", "fix": "Add descriptive alt text to all <img> elements"})
@@ -728,6 +972,35 @@ def tool_design_critique(args: dict) -> dict:
             issues.append({"severity": "warning", "rule": "placeholder-links", "detail": "Placeholder href='#' links found — replace with real URLs before shipping"})
         if 'onclick' in html.lower() or 'onmouseover' in html.lower():
             issues.append({"severity": "warning", "rule": "inline-handlers", "detail": "Inline event handlers found — prefer addEventListener or framework bindings"})
+        if 'animation' in html or 'transition' in html:
+            if 'prefers-reduced-motion' not in html:
+                issues.append({"severity": "warning", "rule": "motion-reduced", "detail": "CSS animations/transitions found but no prefers-reduced-motion media query", "fix": "Add @media (prefers-reduced-motion: reduce) to disable animations"})
+
+    if preset:
+        tc = preset.get("type_constraints", {})
+        if tc.get("display_caps") is False and html:
+            if 'text-transform:uppercase' in html.replace(" ", "").lower() or 'text-transform: uppercase' in html.lower():
+                issues.append({"severity": "error", "rule": "brand-display-caps", "detail": f"Display text uses uppercase — {preset_name} preset forbids caps on display type", "fix": "Remove text-transform:uppercase from display elements"})
+        if tc.get("display_letterspacing") is False and html:
+            if 'letter-spacing' in html.lower():
+                has_display_ls = False
+                for tag in ("h1", "h2", "h3"):
+                    if f"<{tag}" in html and "letter-spacing" in html:
+                        has_display_ls = True
+                if has_display_ls:
+                    issues.append({"severity": "warning", "rule": "brand-display-letterspacing", "detail": f"{preset_name} preset discourages letter-spacing on display type"})
+
+    shadows = tokens.get("shadows", {})
+    if shadows and isinstance(shadows, dict):
+        shadow_keys = [k for k in ("sm", "md", "lg", "xl") if k in shadows]
+        if len(shadow_keys) >= 2:
+            for i in range(1, len(shadow_keys)):
+                s_prev = shadows[shadow_keys[i - 1]]
+                s_curr = shadows[shadow_keys[i]]
+                if isinstance(s_prev, str) and isinstance(s_curr, str):
+                    if len(s_curr) < len(s_prev):
+                        issues.append({"severity": "warning", "rule": "shadow-progression", "detail": f"Shadow '{shadow_keys[i]}' appears smaller than '{shadow_keys[i-1]}' — shadow scale should progress"})
+                        break
 
     errors = sum(1 for i in issues if i["severity"] == "error")
     warnings = sum(1 for i in issues if i["severity"] == "warning")
@@ -750,23 +1023,23 @@ TOOLS = {
         "handler": tool_palette,
     },
     "brand_guidelines": {
-        "description": "Generate a brand guidelines document (voice, palette, typography, spacing, do/don't rules) from a product description.",
-        "inputSchema": {"type": "object", "properties": {"product_description": {"type": "string"}, "tone": {"type": "string", "enum": ["editorial", "utilitarian", "playful", "technical"], "default": "utilitarian"}}, "required": ["product_description"]},
+        "description": "Generate brand guidelines with voice, palette, typography, spacing, motion, shadows, color usage rules, and do/don't constraints. Supports brand presets: restrained, editorial, utilitarian, playful, technical.",
+        "inputSchema": {"type": "object", "properties": {"product_description": {"type": "string"}, "tone": {"type": "string", "enum": ["editorial", "utilitarian", "playful", "technical", "restrained"], "default": "utilitarian"}, "preset": {"type": "string", "enum": ["restrained", "editorial", "utilitarian", "playful", "technical"], "description": "Brand personality preset (Paul Rand 'restrained', editorial, utilitarian, playful, technical)"}}, "required": ["product_description"]},
         "handler": tool_brand_guidelines,
     },
     "generate_design_system": {
-        "description": "Generate a complete design system (palette, type scale, spacing, component specs, accessibility rules, CSS tokens) for a product context.",
-        "inputSchema": {"type": "object", "properties": {"query": {"type": "string", "description": "Product description, e.g. 'enterprise SaaS analytics dashboard'"}, "treatment": {"type": "string", "enum": ["editorial", "utilitarian", "playful", "technical"], "default": "utilitarian"}, "theme_aware": {"type": "boolean", "default": True}, "seed_color": {"type": "string"}}, "required": ["query"]},
+        "description": "Generate a complete design system with palette, type scale, spacing, motion tokens, animation presets, shadow pairs, color usage rules, type constraints, component specs, accessibility rules, and multi-format token export (CSS, Tailwind, Figma, Style Dictionary).",
+        "inputSchema": {"type": "object", "properties": {"query": {"type": "string", "description": "Product description, e.g. 'enterprise SaaS analytics dashboard'"}, "treatment": {"type": "string", "enum": ["editorial", "utilitarian", "playful", "technical", "restrained"], "default": "utilitarian"}, "preset": {"type": "string", "enum": ["restrained", "editorial", "utilitarian", "playful", "technical"], "description": "Brand personality preset"}, "theme_aware": {"type": "boolean", "default": True}, "seed_color": {"type": "string"}}, "required": ["query"]},
         "handler": tool_generate_design_system,
     },
     "create_component": {
-        "description": "Generate a component specification (sizing, spacing, states, variants) with ready-to-use HTML/CSS or React/Tailwind markup.",
+        "description": "Generate a component specification (sizing, spacing, states, variants) with ready-to-use HTML/CSS or React/Tailwind markup. Uses semantic motion tokens.",
         "inputSchema": {"type": "object", "properties": {"component": {"type": "string", "description": "e.g. 'primary button', 'data table', 'pricing card'"}, "tokens": {"type": "object", "description": "Design tokens to apply"}, "framework": {"type": "string", "enum": ["html-css", "react-tailwind"], "default": "html-css"}}, "required": ["component"]},
         "handler": tool_create_component,
     },
     "compose_page": {
-        "description": "Compose a full HTML page from a layout pattern (hero, dashboard, sidebar, pricing, feature_grid, footer) and design tokens.",
-        "inputSchema": {"type": "object", "properties": {"pattern": {"type": "string", "description": "e.g. 'dashboard', 'hero', 'pricing_table', 'sidebar_layout'"}, "tokens": {"type": "object"}, "content": {"type": "object", "description": "Copy/data to fill: title, subtitle, cta, main_content, etc."}}, "required": ["pattern", "tokens"]},
+        "description": "Compose a full HTML page from a layout pattern (hero, dashboard, sidebar, pricing, feature_grid, footer, receipt_card, chat_thread, matrix_grid, card_stack) with semantic motion tokens and prefers-reduced-motion support.",
+        "inputSchema": {"type": "object", "properties": {"pattern": {"type": "string", "description": "e.g. 'dashboard', 'hero', 'receipt_card', 'chat_thread', 'matrix_grid'"}, "tokens": {"type": "object"}, "content": {"type": "object", "description": "Copy/data to fill: title, subtitle, cta, main_content, question, stat, etc."}}, "required": ["pattern", "tokens"]},
         "handler": tool_compose_page,
     },
     "export": {
@@ -774,14 +1047,19 @@ TOOLS = {
         "inputSchema": {"type": "object", "properties": {"content": {"type": "string"}, "content_type": {"type": "string", "enum": ["html", "css", "svg", "markdown", "json"]}, "target": {"type": "string", "enum": ["file", "compose_host"], "default": "file"}, "title": {"type": "string"}}, "required": ["content", "content_type"]},
         "handler": tool_export,
     },
+    "export_tokens": {
+        "description": "Export design tokens in multiple formats: CSS custom properties, Tailwind config, Figma Tokens JSON, or Style Dictionary JSON. All include motion tokens, shadow pairs, and animation presets.",
+        "inputSchema": {"type": "object", "properties": {"tokens": {"type": "object", "description": "Design tokens (color roles, type_scale, spacing, heading_font, body_font)"}, "format": {"type": "string", "enum": ["css", "tailwind", "figma", "style_dictionary"], "default": "css"}}, "required": ["tokens"]},
+        "handler": tool_export_tokens,
+    },
     "render_visual": {
         "description": "Render a visual image via aivision — badges, charts, palette swatches, gradients, patterns, composites. Returns base64 PNG.",
         "inputSchema": {"type": "object", "properties": {"type": {"type": "string", "enum": ["solid", "gradient", "pattern", "badge", "chart_bar", "palette_swatch", "composite"], "description": "Image type to render"}, "width": {"type": "integer"}, "height": {"type": "integer"}, "text": {"type": "string"}, "color": {}, "start": {}, "end": {}, "values": {"type": "array"}, "labels": {"type": "array"}, "colors": {"type": "array"}, "save_path": {"type": "string"}}, "required": ["type"]},
         "handler": tool_render_visual,
     },
     "design_critique": {
-        "description": "Enterprise design audit: 15+ rules covering WCAG contrast (all pairs), color vision deficiency, color distinction, spacing/type scale validation, border radius, invalid colors, HTML accessibility (img alt, lang, placeholder links, inline handlers).",
-        "inputSchema": {"type": "object", "properties": {"tokens": {"type": "object", "description": "Design tokens: color roles, spacing array, type_scale, border_radius"}, "html": {"type": "string", "description": "Optional HTML to audit for accessibility issues"}}, "required": ["tokens"]},
+        "description": "Enterprise design audit: 20+ rules covering WCAG contrast, CVD simulation, color distinction, motion duration/reduced-motion, shadow progression, type scale/constraints, brand preset enforcement, spacing rhythm, border radius, HTML accessibility. Supports brand preset validation.",
+        "inputSchema": {"type": "object", "properties": {"tokens": {"type": "object", "description": "Design tokens: color roles, spacing array, type_scale, border_radius, durations, shadows"}, "html": {"type": "string", "description": "Optional HTML to audit"}, "preset": {"type": "string", "enum": ["restrained", "editorial", "utilitarian", "playful", "technical"], "description": "Brand preset to validate against"}}, "required": ["tokens"]},
         "handler": tool_design_critique,
     },
 }
@@ -797,7 +1075,7 @@ def _handle_request(req: dict) -> dict | None:
     req_id = req.get("id")
 
     if method == "initialize":
-        return {"jsonrpc": "2.0", "id": req_id, "result": {"protocolVersion": "2024-11-05", "serverInfo": {"name": "composer-mcp", "version": "0.2.0"}, "capabilities": {"tools": {}}}}
+        return {"jsonrpc": "2.0", "id": req_id, "result": {"protocolVersion": "2024-11-05", "serverInfo": {"name": "composer-mcp", "version": "0.3.0"}, "capabilities": {"tools": {}}}}
 
     if method == "tools/list":
         return {"jsonrpc": "2.0", "id": req_id, "result": {"tools": [{"name": name, "description": spec["description"], "inputSchema": spec["inputSchema"]} for name, spec in TOOLS.items()]}}
