@@ -34,13 +34,13 @@ def test_initialize():
     resp = _call("initialize")
     info = resp["result"]["serverInfo"]
     assert info["name"] == "composer-mcp"
-    assert info["version"] == "0.3.0"
+    assert info["version"] == "0.4.0"
 
 
 def test_tools_list():
     resp = _call("tools/list")
     names = {t["name"] for t in resp["result"]["tools"]}
-    expected = {"palette", "brand_guidelines", "generate_design_system", "create_component", "compose_page", "export", "export_tokens", "render_visual", "design_critique"}
+    expected = {"palette", "brand_guidelines", "generate_design_system", "create_component", "compose_page", "export", "export_tokens", "render_visual", "design_critique", "backends", "vector_render", "diagram", "image_analyze", "image_process", "color_convert", "texture_generate", "video_probe"}
     assert expected == names, f"missing: {expected - names}, extra: {names - expected}"
 
 
@@ -186,6 +186,104 @@ def test_critique_motion_reduced():
 def test_export_file():
     r = _tool_call("export", {"content": "test", "content_type": "html", "title": "test-export"})
     assert "path" in r
+
+
+def test_backends():
+    r = _tool_call("backends")
+    assert "backends" in r
+    for key in ("libvips", "cairo", "opencv", "pillow", "graphviz", "ffprobe", "imagemagick"):
+        assert key in r["backends"]
+
+
+def test_vector_render_svg():
+    r = _tool_call("vector_render", {"shape": "rect", "width": 200, "height": 100, "fill": "#3b82f6", "text": "test"})
+    assert r["format"] == "svg"
+    assert "<svg" in r["data"] or "data" in r
+    assert r["backend"] in ("cairo", "svg-fallback")
+
+
+def test_vector_render_circle():
+    r = _tool_call("vector_render", {"shape": "circle", "width": 100, "height": 100, "fill": "#ef4444"})
+    assert r["format"] == "svg"
+    assert "circle" in r["data"] or "arc" in str(r)
+
+
+def test_vector_render_multi_element():
+    r = _tool_call("vector_render", {
+        "shape": "rect", "width": 400, "height": 300, "fill": "#f9fafb",
+        "elements": [
+            {"shape": "rect", "x": 10, "y": 10, "w": 180, "h": 80, "fill": "#3b82f6", "rx": 8},
+            {"shape": "circle", "x": 200, "y": 10, "w": 80, "h": 80, "fill": "#ef4444"},
+        ]
+    })
+    assert r["format"] == "svg"
+
+
+def test_diagram_nodes_edges():
+    r = _tool_call("diagram", {
+        "type": "digraph",
+        "nodes": ["A", "B", "C"],
+        "edges": [["A", "B", "label1"], ["B", "C"]],
+        "rankdir": "LR",
+    })
+    assert r.get("format") in ("svg", "dot") or "dot" in r.get("backend", "")
+
+
+def test_diagram_styled():
+    r = _tool_call("diagram", {
+        "nodes": [
+            {"id": "start", "label": "Start", "shape": "circle", "fillcolor": "#3b82f6", "style": "filled"},
+            {"id": "end", "label": "End", "shape": "doublecircle"},
+        ],
+        "edges": [{"from": "start", "to": "end", "label": "go"}],
+        "style": {"node": {"fontname": "Helvetica"}, "edge": {"color": "#666666"}},
+    })
+    assert "data" in r or "dot" in r
+
+
+def test_color_convert_p3():
+    r = _tool_call("color_convert", {"colors": ["#3b82f6", "#ef4444", "#10b981"], "to_space": "display-p3"})
+    assert len(r["conversions"]) == 3
+    assert r["to_space"] == "display-p3"
+
+
+def test_color_convert_oklch():
+    r = _tool_call("color_convert", {"colors": ["#3b82f6"], "to_space": "oklch"})
+    c = r["conversions"][0]
+    assert "L" in c and "C" in c and "H" in c
+
+
+def test_color_convert_lab():
+    r = _tool_call("color_convert", {"colors": ["#ffffff", "#000000"], "to_space": "lab"})
+    assert r["conversions"][0]["L"] > 90
+    assert r["conversions"][1]["L"] < 5
+
+
+def test_color_convert_hsl():
+    r = _tool_call("color_convert", {"colors": ["#ff0000"], "to_space": "hsl"})
+    c = r["conversions"][0]
+    assert c["s"] > 90
+
+
+def test_texture_perlin():
+    r = _tool_call("texture_generate", {"width": 64, "height": 64, "type": "perlin", "octaves": 3})
+    assert r["noise_type"] == "perlin"
+    assert r["dimensions"]["width"] == 64
+
+
+def test_texture_voronoi():
+    r = _tool_call("texture_generate", {"width": 64, "height": 64, "type": "voronoi", "scale": 0.1})
+    assert r["noise_type"] == "voronoi"
+
+
+def test_texture_ridged():
+    r = _tool_call("texture_generate", {"width": 32, "height": 32, "type": "ridged"})
+    assert r["noise_type"] == "ridged"
+
+
+def test_texture_color_map():
+    r = _tool_call("texture_generate", {"width": 32, "height": 32, "type": "perlin", "color_map": ["#000000", "#3b82f6", "#ffffff"]})
+    assert r["dimensions"]["width"] == 32
 
 
 if __name__ == "__main__":

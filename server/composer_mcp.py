@@ -1,11 +1,14 @@
 #!/usr/bin/env python3
-"""Composer MCP v2 — design system MCP with Paul Rand brand discipline.
+"""Composer MCP v3 — design system MCP with Paul Rand brand discipline + pre-AI backends.
 
-9 tools: palette, brand_guidelines, generate_design_system, create_component,
-  compose_page, export, render_visual, design_critique, export_tokens
+16 tools: palette, brand_guidelines, generate_design_system, create_component,
+  compose_page, export, render_visual, design_critique, export_tokens,
+  vector_render, diagram, image_analyze, image_process, color_convert,
+  texture_generate, video_probe
 
 Speaks MCP over stdio (JSON-RPC 2.0, newline-delimited).
 Optional aivision bridge for image rendering (AIVISION_URL env var).
+Optional backends: libvips, Cairo, OpenCV, Graphviz, FFmpeg, Little CMS.
 """
 
 import base64
@@ -17,6 +20,13 @@ import re
 import sys
 import textwrap
 from pathlib import Path
+
+from backends import (
+    available_backends, vector_render as _backend_vector_render,
+    diagram_render as _backend_diagram, image_analyze as _backend_image_analyze,
+    image_process as _backend_image_process, color_convert as _backend_color_convert,
+    texture_generate as _backend_texture_generate, video_probe as _backend_video_probe,
+)
 
 try:
     import httpx
@@ -1014,6 +1024,41 @@ def tool_design_critique(args: dict) -> dict:
     }
 
 
+# ── Backend Tool Handlers ──
+
+
+def tool_backends(args):
+    return {"backends": available_backends()}
+
+
+def tool_vector_render(args):
+    return _backend_vector_render(args)
+
+
+def tool_diagram(args):
+    return _backend_diagram(args)
+
+
+def tool_image_analyze(args):
+    return _backend_image_analyze(args)
+
+
+def tool_image_process(args):
+    return _backend_image_process(args)
+
+
+def tool_color_convert(args):
+    return _backend_color_convert(args)
+
+
+def tool_texture_generate(args):
+    return _backend_texture_generate(args)
+
+
+def tool_video_probe(args):
+    return _backend_video_probe(args)
+
+
 # ── MCP Tool Registry ──
 
 TOOLS = {
@@ -1062,6 +1107,46 @@ TOOLS = {
         "inputSchema": {"type": "object", "properties": {"tokens": {"type": "object", "description": "Design tokens: color roles, spacing array, type_scale, border_radius, durations, shadows"}, "html": {"type": "string", "description": "Optional HTML to audit"}, "preset": {"type": "string", "enum": ["restrained", "editorial", "utilitarian", "playful", "technical"], "description": "Brand preset to validate against"}}, "required": ["tokens"]},
         "handler": tool_design_critique,
     },
+    "backends": {
+        "description": "List available pre-AI backends and their install status (libvips, Cairo, OpenCV, Graphviz, FFmpeg, ImageMagick, Little CMS).",
+        "inputSchema": {"type": "object", "properties": {}},
+        "handler": tool_backends,
+    },
+    "vector_render": {
+        "description": "Render vector graphics (SVG/PDF/PNG) via Cairo or SVG fallback. Supports shapes (rect, circle, ellipse, line, polygon), text, rounded corners, multi-element composition.",
+        "inputSchema": {"type": "object", "properties": {"shape": {"type": "string", "enum": ["rect", "circle", "ellipse", "line", "polygon"], "default": "rect"}, "width": {"type": "integer", "default": 400}, "height": {"type": "integer", "default": 300}, "fill": {"type": "string"}, "stroke": {"type": "string"}, "stroke_width": {"type": "number"}, "text": {"type": "string"}, "font_size": {"type": "number"}, "format": {"type": "string", "enum": ["svg", "pdf", "png"], "default": "svg"}, "elements": {"type": "array", "description": "Additional shape elements to compose"}}, "required": []},
+        "handler": tool_vector_render,
+    },
+    "diagram": {
+        "description": "Generate diagrams via Graphviz (dot, neato, fdp, sfdp, circo, twopi). Accepts raw DOT source or structured nodes/edges. Returns SVG or PNG.",
+        "inputSchema": {"type": "object", "properties": {"dot": {"type": "string", "description": "Raw DOT source (optional — will be built from nodes/edges if omitted)"}, "type": {"type": "string", "enum": ["digraph", "graph"], "default": "digraph"}, "nodes": {"type": "array", "description": "Node list: strings or {id, label, shape, color, fillcolor, style}"}, "edges": {"type": "array", "description": "Edge list: [src, dst, label?] or {from, to, label?}"}, "layout": {"type": "string", "enum": ["dot", "neato", "fdp", "sfdp", "circo", "twopi"], "default": "dot"}, "format": {"type": "string", "enum": ["svg", "png"], "default": "svg"}, "rankdir": {"type": "string", "enum": ["TB", "BT", "LR", "RL"], "default": "TB"}, "style": {"type": "object", "description": "Default styles: {node: {shape, ...}, edge: {color, ...}, graph: {bgcolor, ...}}"}}, "required": []},
+        "handler": tool_diagram,
+    },
+    "image_analyze": {
+        "description": "Analyze an image: histogram, edge detection (Canny), dominant colors (k-means), contour detection, blur score. Uses OpenCV with Pillow fallback.",
+        "inputSchema": {"type": "object", "properties": {"source": {"type": "string", "description": "File path or base64-encoded image data"}, "operations": {"type": "array", "items": {"type": "string", "enum": ["histogram", "edges", "dominant_colors", "contours", "blur_score"]}, "default": ["histogram", "edges", "dominant_colors"]}}, "required": ["source"]},
+        "handler": tool_image_analyze,
+    },
+    "image_process": {
+        "description": "Process images through a pipeline of operations: resize, crop, rotate, flip, sharpen, blur, grayscale, brightness, composite. Uses libvips (10-100x faster) with Pillow fallback.",
+        "inputSchema": {"type": "object", "properties": {"source": {"type": "string", "description": "File path or base64-encoded image data"}, "pipeline": {"type": "array", "description": "Array of operations: [{action: 'resize', width: 800}, {action: 'blur', sigma: 3}, ...]", "items": {"type": "object"}}, "output_format": {"type": "string", "enum": ["png", "jpg", "webp"], "default": "png"}}, "required": ["source"]},
+        "handler": tool_image_process,
+    },
+    "color_convert": {
+        "description": "Convert colors between color spaces: sRGB, linear-sRGB, Display P3, OKLCh, HSL, CIELAB. Uses Little CMS with math fallback.",
+        "inputSchema": {"type": "object", "properties": {"colors": {"type": "array", "description": "Array of hex strings or [r,g,b] arrays"}, "from_space": {"type": "string", "enum": ["srgb"], "default": "srgb"}, "to_space": {"type": "string", "enum": ["linear-srgb", "display-p3", "oklch", "hsl", "lab"], "default": "display-p3"}, "output": {"type": "string", "enum": ["hex", "css"], "default": "hex"}}, "required": ["colors"]},
+        "handler": tool_color_convert,
+    },
+    "texture_generate": {
+        "description": "Generate procedural noise textures: Perlin, ridged multifractal, turbulence, Voronoi. Configurable octaves, persistence, lacunarity, color maps. Returns PNG.",
+        "inputSchema": {"type": "object", "properties": {"width": {"type": "integer", "default": 256}, "height": {"type": "integer", "default": 256}, "type": {"type": "string", "enum": ["perlin", "ridged", "turbulence", "voronoi"], "default": "perlin"}, "scale": {"type": "number", "default": 0.05}, "octaves": {"type": "integer", "default": 4}, "persistence": {"type": "number", "default": 0.5}, "lacunarity": {"type": "number", "default": 2.0}, "color_map": {"type": "array", "description": "Array of hex colors for gradient mapping"}, "format": {"type": "string", "enum": ["png", "jpg"], "default": "png"}}, "required": []},
+        "handler": tool_texture_generate,
+    },
+    "video_probe": {
+        "description": "Extract video metadata via FFprobe: duration, resolution, FPS, codecs, bitrate, audio channels. Requires FFmpeg installed.",
+        "inputSchema": {"type": "object", "properties": {"source": {"type": "string", "description": "Path to video file"}}, "required": ["source"]},
+        "handler": tool_video_probe,
+    },
 }
 
 
@@ -1075,7 +1160,7 @@ def _handle_request(req: dict) -> dict | None:
     req_id = req.get("id")
 
     if method == "initialize":
-        return {"jsonrpc": "2.0", "id": req_id, "result": {"protocolVersion": "2024-11-05", "serverInfo": {"name": "composer-mcp", "version": "0.3.0"}, "capabilities": {"tools": {}}}}
+        return {"jsonrpc": "2.0", "id": req_id, "result": {"protocolVersion": "2024-11-05", "serverInfo": {"name": "composer-mcp", "version": "0.4.0"}, "capabilities": {"tools": {}}}}
 
     if method == "tools/list":
         return {"jsonrpc": "2.0", "id": req_id, "result": {"tools": [{"name": name, "description": spec["description"], "inputSchema": spec["inputSchema"]} for name, spec in TOOLS.items()]}}
