@@ -1,0 +1,23 @@
+# Optional pre-AI backends for composer-mcp v0.4.0+
+# Install what you need — all have pure-Python fallbacks
+
+# Image processing (10-100x faster than Pillow)
+pyvips>=2.2.0
+
+# Vector graphics (SVG/PDF/PNG)
+pycairo>=1.24.0
+
+# Computer vision (histogram, edges, dominant colors, contours)
+opencv-python-headless>=4.8.0
+
+# Color management (ICC profiles)
+# littlecms — or use system lcms2
+
+# Core (always required)
+Pillow>=10.0.0
+httpx>=0.25.0
+
+# CLI backends (install via system package manager):
+# brew install graphviz    # diagram tool
+# brew install ffmpeg      # video_probe tool
+# brew install imagemagick # image_process fallback
